@@ -97,9 +97,6 @@ export function commercePlugin(
 			{ path: "/analytics", label: "Analytics", icon: "chart" },
 			{ path: "/settings", label: "Settings", icon: "gear" },
 		],
-		adminWidgets: [
-			{ id: "revenue-overview", title: "Revenue", size: "half" },
-			{ id: "recent-orders", title: "Recent Orders", size: "half" },
-		],
+		adminWidgets: [],
 	};
 }
