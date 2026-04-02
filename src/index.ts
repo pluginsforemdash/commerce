@@ -84,6 +84,10 @@ export function commercePlugin(
 			downloads: {
 				indexes: ["orderId", "productId", "token", "expiresAt"],
 			},
+			licenses: {
+				indexes: ["orderId", "customerEmail", "productId", "key", "status", "createdAt"],
+				uniqueIndexes: ["key"],
+			},
 			analytics: {
 				indexes: ["date", "type"],
 			},
@@ -94,6 +98,7 @@ export function commercePlugin(
 			{ path: "/orders", label: "Orders", icon: "inbox" },
 			{ path: "/customers", label: "Customers", icon: "users" },
 			{ path: "/discounts", label: "Discounts", icon: "tag" },
+			{ path: "/licenses", label: "Licenses", icon: "tag" },
 			{ path: "/analytics", label: "Analytics", icon: "chart" },
 			{ path: "/settings", label: "Settings", icon: "gear" },
 		],

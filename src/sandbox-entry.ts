@@ -162,6 +162,18 @@ interface Download {
 	createdAt: string;
 }
 
+interface License {
+	key: string;
+	orderId: string;
+	orderNumber: string;
+	productId: string;
+	productName: string;
+	customerEmail: string;
+	customerName: string;
+	status: "active" | "revoked" | "expired";
+	createdAt: string;
+}
+
 interface AnalyticsEntry {
 	date: string; // YYYY-MM-DD
 	type: "daily_summary";
@@ -327,6 +339,19 @@ function genOrderNumber(): string {
 	const prefix = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
 	const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
 	return `ORD-${prefix}-${rand}`;
+}
+
+function genLicenseKey(): string {
+	const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I to avoid confusion
+	const segments: string[] = [];
+	for (let s = 0; s < 4; s++) {
+		let seg = "";
+		for (let i = 0; i < 5; i++) {
+			seg += chars[Math.floor(Math.random() * chars.length)];
+		}
+		segments.push(seg);
+	}
+	return `PFE-${segments.join("-")}`;
 }
 
 function genDownloadToken(): string {
@@ -577,6 +602,39 @@ async function sendDigitalDownloadEmail(ctx: PluginContext, order: Order, downlo
 			`Each link can be used ${downloads[0]?.downloadLimit ?? 5} times and expires in 7 days.`,
 			"",
 			`- ${storeName}`,
+		].join("\n"),
+	);
+}
+
+async function sendLicenseEmail(ctx: PluginContext, order: Order, licenses: License[]): Promise<void> {
+	const storeName = (await ctx.kv.get<string>("settings:storeName")) ?? "Plugins for EmDash";
+
+	const licenseLines = licenses.map((l) =>
+		`  ${l.productName}: ${l.key}`
+	).join("\n");
+
+	await sendEmail(ctx, order.customerEmail,
+		`Your license key${licenses.length > 1 ? "s" : ""} — ${order.orderNumber}`,
+		[
+			`Hi ${order.customerName},`,
+			"",
+			`Thank you for your purchase from ${storeName}!`,
+			"",
+			`Your license key${licenses.length > 1 ? "s" : ""}:`,
+			"",
+			licenseLines,
+			"",
+			"To activate:",
+			"  1. Go to your EmDash admin panel",
+			"  2. Navigate to the plugin's Settings page",
+			"  3. Paste the license key and save",
+			"",
+			`Order: ${order.orderNumber}`,
+			`Total: ${formatCents(order.total, order.currency)}`,
+			"",
+			"If you have any questions, reply to this email.",
+			"",
+			`— ${storeName}`,
 		].join("\n"),
 	);
 }
@@ -1120,6 +1178,26 @@ export default definePlugin({
 							}
 						}
 
+						// Generate license keys for digital products
+						const generatedLicenses: License[] = [];
+						for (const item of order.items) {
+							if (item.type === "digital") {
+								const license: License = {
+									key: genLicenseKey(),
+									orderId: orderId!,
+									orderNumber: order.orderNumber,
+									productId: item.productId,
+									productName: item.name,
+									customerEmail: order.customerEmail,
+									customerName: order.customerName,
+									status: "active",
+									createdAt: now(),
+								};
+								await ctx.storage.licenses!.put(genId(), license);
+								generatedLicenses.push(license);
+							}
+						}
+
 						// Create digital download tokens (Pro)
 						const digitalItems = order.items.filter((i) => i.type === "digital");
 						const downloads: Download[] = [];
@@ -1157,6 +1235,9 @@ export default definePlugin({
 						// Send emails (fire-and-forget)
 						notifyAdmin(ctx, order).catch((e) => ctx.log.warn("Admin email failed", e));
 						sendOrderConfirmation(ctx, order).catch((e) => ctx.log.warn("Order confirmation email failed", e));
+						if (generatedLicenses.length > 0) {
+							sendLicenseEmail(ctx, order, generatedLicenses).catch((e) => ctx.log.warn("License email failed", e));
+						}
 						if (downloads.length > 0) {
 							sendDigitalDownloadEmail(ctx, order, downloads).catch((e) => ctx.log.warn("Download email failed", e));
 						}
@@ -1508,6 +1589,27 @@ export default definePlugin({
 			},
 		},
 
+		// ── License Verification (public) ──
+
+		"storefront/verify-license": {
+			public: true,
+			input: z.object({ key: z.string().min(1) }),
+			handler: async (routeCtx: { input: { key: string } }, ctx: PluginContext) => {
+				const result = await ctx.storage.licenses!.query({ where: { key: routeCtx.input.key }, limit: 1 });
+				if (result.items.length === 0) return { valid: false, error: "Invalid license key" };
+
+				const license = result.items[0]!.data as License;
+				if (license.status !== "active") return { valid: false, error: "License is " + license.status };
+
+				return {
+					valid: true,
+					product: license.productName,
+					customerEmail: license.customerEmail,
+					createdAt: license.createdAt,
+				};
+			},
+		},
+
 		// Debug: check if settings are saved (remove after testing)
 		debug: {
 			public: true,
@@ -1575,6 +1677,7 @@ export default definePlugin({
 				if (interaction.type === "page_load" && interaction.page === "/orders") return buildOrdersPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/customers") return buildCustomersPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/discounts") return buildDiscountsPage(ctx);
+				if (interaction.type === "page_load" && interaction.page === "/licenses") return buildLicensesPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/analytics") return buildAnalyticsPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/settings") return buildSettingsPage(ctx);
 
@@ -1600,6 +1703,19 @@ export default definePlugin({
 					const id = interaction.action_id.split(":")[1];
 					if (id) return saveProduct(ctx, id, interaction.values ?? {});
 					return buildProductsPage(ctx);
+				}
+
+				// License revoke
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("license_revoke:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) {
+						const license = (await ctx.storage.licenses!.get(id)) as License | null;
+						if (license) {
+							license.status = "revoked";
+							await ctx.storage.licenses!.put(id, license);
+						}
+					}
+					return { ...(await buildLicensesPage(ctx)), toast: { message: "License revoked", type: "success" } };
 				}
 
 				// Clear all orders
@@ -2013,6 +2129,70 @@ async function buildDiscountsPage(ctx: PluginContext) {
 		}
 		return { blocks };
 	} catch (error) { ctx.log.error("Discounts page error", error); return { blocks: [{ type: "context", text: "Failed to load discounts" }] }; }
+}
+
+async function buildLicensesPage(ctx: PluginContext) {
+	try {
+		if (!ctx.storage?.licenses) return { blocks: [{ type: "header", text: "Licenses" }, { type: "context", text: "License storage initializing..." }] };
+
+		const result = await ctx.storage.licenses.query({ orderBy: { createdAt: "desc" }, limit: 50 });
+		const licenses = result.items as Array<{ id: string; data: License }>;
+
+		const [totalActive, totalRevoked] = await Promise.all([
+			ctx.storage.licenses.count({ status: "active" }),
+			ctx.storage.licenses.count({ status: "revoked" }),
+		]);
+
+		const blocks: unknown[] = [
+			{ type: "header", text: "Licenses" },
+			{ type: "stats", stats: [
+				{ label: "Active", value: String(totalActive) },
+				{ label: "Revoked", value: String(totalRevoked) },
+				{ label: "Total", value: String(totalActive + totalRevoked) },
+			]},
+			{ type: "divider" },
+		];
+
+		if (licenses.length === 0) {
+			blocks.push({ type: "context", text: "No licenses yet. Licenses are generated automatically when digital products are purchased." });
+		} else {
+			blocks.push({
+				type: "table",
+				columns: [
+					{ key: "key", label: "License Key" },
+					{ key: "product", label: "Product" },
+					{ key: "customer", label: "Customer" },
+					{ key: "order", label: "Order" },
+					{ key: "status", label: "Status", format: "badge" },
+					{ key: "date", label: "Created", format: "relative_time" },
+				],
+				rows: licenses.map((l) => ({
+					key: l.data.key,
+					product: l.data.productName,
+					customer: l.data.customerEmail,
+					order: l.data.orderNumber,
+					status: l.data.status,
+					date: l.data.createdAt,
+				})),
+			});
+
+			for (const l of licenses) {
+				if (l.data.status === "active") {
+					blocks.push({ type: "actions", elements: [
+						{
+							type: "button", text: `Revoke ${l.data.key}`, action_id: `license_revoke:${l.id}`, style: "danger",
+							confirm: { title: "Revoke License?", text: `This will deactivate license ${l.data.key} for ${l.data.customerEmail}.`, confirm: "Revoke", deny: "Cancel" },
+						},
+					]});
+				}
+			}
+		}
+
+		return { blocks };
+	} catch (error) {
+		ctx.log.error("Licenses page error", error);
+		return { blocks: [{ type: "context", text: "Failed to load licenses" }] };
+	}
 }
 
 async function buildAnalyticsPage(ctx: PluginContext) {
