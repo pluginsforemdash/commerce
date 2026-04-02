@@ -1595,12 +1595,14 @@ export default definePlugin({
 
 async function buildRevenueWidget(ctx: PluginContext) {
 	try {
+		if (!ctx.storage?.orders) return { blocks: [{ type: "context", text: "Store initializing..." }] };
 		const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
-		const paidResult = await ctx.storage.orders!.query({
+		const paidResult = await ctx.storage.orders.query({
 			where: { status: { in: ["paid", "processing", "shipped", "delivered"] } }, limit: 100,
 		});
-		const revenue = paidResult.items.reduce((sum: number, i: { data: unknown }) => sum + (i.data as Order).total, 0);
-		const orderCount = paidResult.items.length;
+		const items = paidResult?.items ?? [];
+		const revenue = items.reduce((sum: number, i: { data: unknown }) => sum + (i.data as Order).total, 0);
+		const orderCount = items.length;
 		return {
 			blocks: [{
 				type: "stats",
@@ -1616,9 +1618,11 @@ async function buildRevenueWidget(ctx: PluginContext) {
 
 async function buildRecentOrdersWidget(ctx: PluginContext) {
 	try {
+		if (!ctx.storage?.orders) return { blocks: [{ type: "context", text: "Store initializing..." }] };
 		const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
-		const result = await ctx.storage.orders!.query({ orderBy: { createdAt: "desc" }, limit: 5 });
-		if (result.items.length === 0) return { blocks: [{ type: "context", text: "No orders yet" }] };
+		const result = await ctx.storage.orders.query({ orderBy: { createdAt: "desc" }, limit: 5 });
+		const items = result?.items ?? [];
+		if (items.length === 0) return { blocks: [{ type: "context", text: "No orders yet" }] };
 		return {
 			blocks: [{
 				type: "table",
@@ -1626,7 +1630,7 @@ async function buildRecentOrdersWidget(ctx: PluginContext) {
 					{ key: "order", label: "Order" }, { key: "customer", label: "Customer" },
 					{ key: "total", label: "Total" }, { key: "status", label: "Status", format: "badge" },
 				],
-				rows: result.items.map((i: { data: unknown }) => {
+				rows: items.map((i: { data: unknown }) => {
 					const o = i.data as Order;
 					return { order: o.orderNumber, customer: o.customerName, total: formatCents(o.total, currency), status: o.status };
 				}),
@@ -1637,6 +1641,13 @@ async function buildRecentOrdersWidget(ctx: PluginContext) {
 
 async function buildDashboard(ctx: PluginContext) {
 	try {
+		if (!ctx.storage?.orders || !ctx.storage?.products || !ctx.storage?.customers) {
+			return { blocks: [
+				{ type: "header", text: "Store Dashboard" },
+				{ type: "banner", variant: "default", title: "Initializing", description: "The commerce plugin is setting up. Refresh the page in a moment." },
+			]};
+		}
+
 		const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
 		const stripeKey = await ctx.kv.get<string>("settings:stripeSecretKey");
 		const stripeAccount = await ctx.kv.get<string>("settings:stripeAccountId");
@@ -1653,13 +1664,13 @@ async function buildDashboard(ctx: PluginContext) {
 		}
 
 		const [totalOrders, paidOrders, processingCount, activeProducts, totalCustomers] = await Promise.all([
-			ctx.storage.orders!.count(), ctx.storage.orders!.count({ status: "paid" }),
-			ctx.storage.orders!.count({ status: "processing" }), ctx.storage.products!.count({ status: "active" }),
-			ctx.storage.customers!.count(),
+			ctx.storage.orders.count(), ctx.storage.orders.count({ status: "paid" }),
+			ctx.storage.orders.count({ status: "processing" }), ctx.storage.products.count({ status: "active" }),
+			ctx.storage.customers.count(),
 		]);
 
-		const paidResult = await ctx.storage.orders!.query({ where: { status: { in: ["paid", "processing", "shipped", "delivered"] } }, limit: 100 });
-		const revenue = paidResult.items.reduce((sum: number, i: { data: unknown }) => sum + (i.data as Order).total, 0);
+		const paidResult = await ctx.storage.orders.query({ where: { status: { in: ["paid", "processing", "shipped", "delivered"] } }, limit: 100 });
+		const revenue = (paidResult?.items ?? []).reduce((sum: number, i: { data: unknown }) => sum + (i.data as Order).total, 0);
 
 		blocks.push(
 			{ type: "stats", stats: [
@@ -1675,15 +1686,16 @@ async function buildDashboard(ctx: PluginContext) {
 			blocks.push({ type: "banner", variant: "default", title: `${processingCount} order${processingCount > 1 ? "s" : ""} need processing`, description: "Go to Orders to fulfill them." });
 		}
 
-		const recent = await ctx.storage.orders!.query({ orderBy: { createdAt: "desc" }, limit: 10 });
-		if (recent.items.length > 0) {
+		const recent = await ctx.storage.orders.query({ orderBy: { createdAt: "desc" }, limit: 10 });
+		const recentItems = recent?.items ?? [];
+		if (recentItems.length > 0) {
 			blocks.push(
 				{ type: "section", text: "**Recent Orders**" },
 				{ type: "table", columns: [
 					{ key: "order", label: "Order" }, { key: "customer", label: "Customer" },
 					{ key: "total", label: "Total" }, { key: "status", label: "Status", format: "badge" },
 					{ key: "date", label: "Date", format: "relative_time" },
-				], rows: recent.items.map((i: { data: unknown }) => {
+				], rows: recentItems.map((i: { data: unknown }) => {
 					const o = i.data as Order;
 					return { order: o.orderNumber, customer: o.customerName, total: formatCents(o.total, currency), status: o.status, date: o.createdAt };
 				})},
