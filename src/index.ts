@@ -6,11 +6,14 @@
  *
  * ## Tiers
  *
- * **Free** — Full store, your own Stripe keys, unlimited products & orders.
+ * **Free ($0)** — Full store, your own Stripe keys, unlimited products & orders.
  *
- * **Pro ($19/mo + 1.5% transaction fee)** — Stripe Connect (no key setup),
- * customer order/shipping emails, abandoned cart recovery, analytics
- * dashboard, digital downloads, WooCommerce CSV import, multi-currency.
+ * **Pro ($29/mo)** — Own Stripe keys, 0% transaction fee, plus all Pro
+ * features: customer emails, abandoned cart recovery, analytics, digital
+ * downloads, WooCommerce import.
+ *
+ * **Pro Connect ($19/mo + 1.5%)** — Stripe Connect (managed checkout, no
+ * key setup), plus all Pro features.
  *
  * @example
  * ```typescript
@@ -38,7 +41,7 @@ export function commercePlugin(
 ): PluginDescriptor<CommercePluginOptions> {
 	return {
 		id: "commerce",
-		version: "0.2.0",
+		version: "0.3.0",
 		format: "standard",
 		entrypoint: "emdash-plugin-commerce/sandbox",
 		options,

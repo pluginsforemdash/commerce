@@ -1,6 +1,6 @@
 {
 	"name": "emdash-plugin-commerce",
-	"version": "0.1.0",
+	"version": "0.3.0",
 	"description": "E-commerce plugin for EmDash CMS — products, cart, checkout, orders, and payments powered by Stripe",
 	"type": "module",
 	"main": "src/index.ts",

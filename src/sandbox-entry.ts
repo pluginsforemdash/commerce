@@ -1,11 +1,12 @@
 /**
- * Sandbox Entry Point — Commerce Plugin v0.2.0
+ * Sandbox Entry Point — Commerce Plugin v0.3.0
  *
  * WooCommerce alternative for EmDash CMS.
  *
- * Free: full store, own Stripe keys.
- * Pro ($19/mo + 1.5%): Stripe Connect, customer emails, abandoned cart
- * recovery, analytics, digital downloads, WooCommerce import.
+ * Three tiers:
+ * - Free ($0): Full store, own Stripe keys, no Pro features.
+ * - Pro ($29/mo): Own Stripe keys + all Pro features. No transaction fee.
+ * - Pro Connect ($19/mo + 1.5%): Stripe Connect (managed) + all Pro features.
  */
 
 import { definePlugin } from "emdash";
@@ -370,9 +371,20 @@ function throw403(msg: string): never {
 // PRO TIER & STRIPE
 // ══════════════════════════════════════════
 
+type Tier = "free" | "pro" | "pro_connect";
+
+async function getTier(ctx: PluginContext): Promise<Tier> {
+	const licenseKey = await ctx.kv.get<string>("settings:licenseKey");
+	if (!licenseKey) return "free";
+
+	const stripeAccountId = await ctx.kv.get<string>("settings:stripeAccountId");
+	if (stripeAccountId) return "pro_connect";
+
+	return "pro";
+}
+
 async function isPro(ctx: PluginContext): Promise<boolean> {
-	const key = await ctx.kv.get<string>("settings:licenseKey");
-	return !!key;
+	return (await getTier(ctx)) !== "free";
 }
 
 function requirePro(pro: boolean, feature: string): void {
@@ -958,12 +970,12 @@ export default definePlugin({
 
 				// Create Stripe session
 				const siteUrl = (await ctx.kv.get<string>("settings:siteUrl")) ?? "";
-				const pro = await isPro(ctx);
+				const tier = await getTier(ctx);
 				let checkoutUrl: string;
 				let stripeSessionId: string;
 
-				if (pro) {
-					// Stripe Connect via platform
+				if (tier === "pro_connect") {
+					// Stripe Connect via platform (Pro Connect tier)
 					const platformResult = await platformCheckout(ctx, {
 						currency,
 						successUrl: `${siteUrl}/order/success?session_id={CHECKOUT_SESSION_ID}`,
@@ -982,7 +994,7 @@ export default definePlugin({
 					checkoutUrl = platformResult.url as string;
 					stripeSessionId = platformResult.sessionId as string;
 				} else {
-					// Direct Stripe (own keys)
+					// Direct Stripe — own keys (Free and Pro tiers)
 					const stripeParams: Record<string, string> = {
 						"mode": "payment",
 						"customer_email": customerEmail,
@@ -1637,7 +1649,7 @@ async function buildDashboard(ctx: PluginContext) {
 		}
 
 		if (!pro) {
-			blocks.push({ type: "banner", variant: "default", title: "Upgrade to Pro", description: "Get Stripe Connect, customer emails, abandoned cart recovery, analytics, digital downloads, and WooCommerce import for $19/mo. Visit pluginsforemdash.com/pricing" });
+			blocks.push({ type: "banner", variant: "default", title: "Upgrade to Pro", description: "Customer emails, abandoned cart recovery, analytics, digital downloads, and WooCommerce import. Pro $29/mo (own keys) or Pro Connect $19/mo + 1.5% (managed Stripe). pluginsforemdash.com/pricing" });
 		}
 
 		const [totalOrders, paidOrders, processingCount, activeProducts, totalCustomers] = await Promise.all([
@@ -1853,7 +1865,7 @@ async function buildAnalyticsPage(ctx: PluginContext) {
 		return {
 			blocks: [
 				{ type: "header", text: "Analytics" },
-				{ type: "banner", variant: "alert", title: "Pro feature", description: "Analytics dashboard with revenue charts, top products, and customer insights requires a Pro license. Upgrade at pluginsforemdash.com/pricing" },
+				{ type: "banner", variant: "alert", title: "Pro feature", description: "Analytics requires Pro ($29/mo) or Pro Connect ($19/mo + 1.5%). Revenue charts, top products, and customer insights. Upgrade at pluginsforemdash.com/pricing" },
 			],
 		};
 	}
@@ -1945,21 +1957,24 @@ async function buildSettingsPage(ctx: PluginContext) {
 		const blocks: unknown[] = [{ type: "header", text: "Store Settings" }];
 
 		// Tier status
-		if (pro && stripeAccount) {
-			blocks.push({ type: "banner", variant: "default", title: "Pro Plan Active — Stripe Connected", description: "Payments are handled via Stripe Connect. 1.5% platform fee applies." });
-		} else if (pro) {
-			blocks.push({ type: "banner", variant: "alert", title: "Pro Plan Active — Connect Stripe", description: "Visit pluginsforemdash.com/connect to link your Stripe account for managed checkout." });
+		const tier = await getTier(ctx);
+		if (tier === "pro_connect") {
+			blocks.push({ type: "banner", variant: "default", title: "Pro Connect Active — Stripe Connected", description: "Payments via Stripe Connect. 1.5% platform fee. All Pro features enabled." });
+		} else if (tier === "pro" && stripeKey) {
+			blocks.push({ type: "banner", variant: "default", title: "Pro Active — Using Your Stripe Keys", description: "All Pro features enabled. No transaction fee. $29/mo." });
+		} else if (tier === "pro" && !stripeKey) {
+			blocks.push({ type: "banner", variant: "alert", title: "Pro Active — Add Stripe Key", description: "Add your Stripe secret key below to start accepting payments." });
 		} else if (stripeKey) {
-			blocks.push({ type: "banner", variant: "default", title: "Free Plan — Using Your Stripe Keys", description: "Upgrade to Pro ($19/mo) for Stripe Connect, customer emails, analytics, and more." });
+			blocks.push({ type: "banner", variant: "default", title: "Free Plan — Using Your Stripe Keys", description: "Upgrade to Pro ($29/mo) for customer emails, analytics, abandoned cart recovery, and more. Or Pro Connect ($19/mo + 1.5%) for managed Stripe." });
 		} else {
-			blocks.push({ type: "banner", variant: "alert", title: "Payments Not Configured", description: "Add your Stripe secret key below (free) or upgrade to Pro for Stripe Connect." });
+			blocks.push({ type: "banner", variant: "alert", title: "Payments Not Configured", description: "Add your Stripe secret key below (free) or upgrade to Pro." });
 		}
 
 		blocks.push({ type: "form", block_id: "store-settings", fields: [
 			{ type: "text_input", action_id: "storeName", label: "Store Name", initial_value: storeName },
 			{ type: "text_input", action_id: "siteUrl", label: "Site URL", initial_value: siteUrl },
 			{ type: "divider" },
-			{ type: "secret_input", action_id: "licenseKey", label: "Pro License Key ($19/mo — pluginsforemdash.com)" },
+			{ type: "secret_input", action_id: "licenseKey", label: "Pro License Key (Pro $29/mo or Pro Connect $19/mo + 1.5%)" },
 			{ type: "secret_input", action_id: "stripeSecretKey", label: "Stripe Secret Key (free tier)" },
 			{ type: "text_input", action_id: "stripeWebhookSecret", label: "Stripe Webhook Secret" },
 			{ type: "divider" },
@@ -1981,11 +1996,11 @@ async function buildSettingsPage(ctx: PluginContext) {
 		);
 
 		// Pro features summary
-		if (!pro) {
+		if (tier === "free") {
 			blocks.push(
 				{ type: "divider" },
-				{ type: "section", text: "**Pro Features ($19/mo)**" },
-				{ type: "context", text: "Stripe Connect (no key setup, 1.5% fee) | Customer order & shipping emails | Abandoned cart recovery | Analytics dashboard with revenue charts | Digital product downloads | WooCommerce CSV import | Priority support" },
+				{ type: "section", text: "**Upgrade to Pro**" },
+				{ type: "context", text: "Pro ($29/mo, own Stripe keys, 0% fee) or Pro Connect ($19/mo + 1.5%, managed Stripe). Both include: Customer order & shipping emails | Abandoned cart recovery | Analytics dashboard with charts | Digital product downloads | WooCommerce CSV import | Priority support" },
 			);
 		}
 
