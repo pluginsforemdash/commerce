@@ -1565,18 +1565,23 @@ export default definePlugin({
 				if (interaction.type === "form_submit" && interaction.action_id === "create_product") return createProduct(ctx, interaction.values ?? {});
 				if (interaction.type === "form_submit" && interaction.action_id === "create_discount") return createDiscount(ctx, interaction.values ?? {});
 
-				// Product status change
-				if (interaction.type === "block_action" && interaction.action_id?.startsWith("product_status:")) {
-					const [, id, status] = interaction.action_id.split(":");
-					if (id && status) {
-						const product = (await ctx.storage.products!.get(id)) as Product | null;
-						if (product) {
-							product.status = status as Product["status"];
-							product.updatedAt = now();
-							await ctx.storage.products!.put(id, product);
-						}
-					}
-					return { ...(await buildProductsPage(ctx)), toast: { message: `Product ${status === "active" ? "activated" : "set to draft"}`, type: "success" } };
+				// Back to products list
+				if (interaction.type === "block_action" && interaction.action_id === "back_to_products") {
+					return buildProductsPage(ctx);
+				}
+
+				// Show product edit form
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("product_edit:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) return buildProductEditPage(ctx, id);
+					return buildProductsPage(ctx);
+				}
+
+				// Save product edit
+				if (interaction.type === "form_submit" && interaction.action_id?.startsWith("save_product:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) return saveProduct(ctx, id, interaction.values ?? {});
+					return buildProductsPage(ctx);
 				}
 
 				// Product delete
@@ -1768,37 +1773,103 @@ async function buildProductsPage(ctx: PluginContext) {
 			blocks.push({
 				type: "table",
 				columns: [
-					{ key: "name", label: "Name" }, { key: "price", label: "Price" },
-					{ key: "inventory", label: "Stock" }, { key: "type", label: "Type" },
+					{ key: "name", label: "Name" }, { key: "slug", label: "Slug" },
+					{ key: "price", label: "Price" }, { key: "type", label: "Type" },
 					{ key: "status", label: "Status", format: "badge" },
 				],
 				rows: products.map((p) => ({
-					name: p.data.name,
+					name: p.data.name, slug: p.data.slug,
 					price: formatCents(p.data.price, currency),
-					inventory: p.data.inventory === -1 ? "Unlimited" : String(p.data.inventory),
-					type: p.data.type ?? "physical",
-					status: p.data.status,
+					type: p.data.type ?? "physical", status: p.data.status,
 				})),
 			});
 
-			// Action buttons per product
 			for (const p of products) {
-				const elements: unknown[] = [];
-				if (p.data.status === "draft") {
-					elements.push({ type: "button", text: `Activate "${p.data.name}"`, action_id: `product_status:${p.id}:active`, style: "primary" });
-				} else if (p.data.status === "active") {
-					elements.push({ type: "button", text: `Draft "${p.data.name}"`, action_id: `product_status:${p.id}:draft` });
-				}
-				elements.push({
-					type: "button", text: `Delete "${p.data.name}"`, action_id: `product_delete:${p.id}`, style: "danger",
-					confirm: { title: "Delete Product?", text: `Permanently delete ${p.data.name}?`, confirm: "Delete", deny: "Cancel" },
-				});
-				blocks.push({ type: "actions", elements });
+				blocks.push({ type: "actions", elements: [
+					{ type: "button", text: `Edit "${p.data.name}"`, action_id: `product_edit:${p.id}` },
+					{
+						type: "button", text: "Delete", action_id: `product_delete:${p.id}`, style: "danger",
+						confirm: { title: "Delete Product?", text: `Permanently delete ${p.data.name}?`, confirm: "Delete", deny: "Cancel" },
+					},
+				]});
 			}
 		}
 
 		return { blocks };
 	} catch (error) { ctx.log.error("Products page error", error); return { blocks: [{ type: "context", text: "Failed to load products" }] }; }
+}
+
+async function buildProductEditPage(ctx: PluginContext, productId: string) {
+	try {
+		const product = (await ctx.storage.products!.get(productId)) as Product | null;
+		if (!product) return { ...(await buildProductsPage(ctx)), toast: { message: "Product not found", type: "error" } };
+
+		const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
+
+		return {
+			blocks: [
+				{ type: "header", text: `Edit: ${product.name}` },
+				{
+					type: "form", block_id: `edit-product-${productId}`,
+					fields: [
+						{ type: "text_input", action_id: "name", label: "Product Name", initial_value: product.name },
+						{ type: "text_input", action_id: "slug", label: "URL Slug", initial_value: product.slug },
+						{ type: "text_input", action_id: "description", label: "Description", initial_value: product.description },
+						{ type: "number_input", action_id: "price", label: "Price (cents)", initial_value: product.price, min: 0 },
+						{ type: "number_input", action_id: "compareAtPrice", label: "Compare At Price (cents, 0 = none)", initial_value: product.compareAtPrice ?? 0, min: 0 },
+						{ type: "number_input", action_id: "inventory", label: "Inventory (-1 = unlimited)", initial_value: product.inventory },
+						{ type: "select", action_id: "status", label: "Status", initial_value: product.status, options: [
+							{ label: "Draft", value: "draft" },
+							{ label: "Active", value: "active" },
+							{ label: "Archived", value: "archived" },
+						]},
+						{ type: "select", action_id: "type", label: "Type", initial_value: product.type ?? "physical", options: [
+							{ label: "Physical", value: "physical" },
+							{ label: "Digital", value: "digital" },
+						]},
+						{ type: "text_input", action_id: "sku", label: "SKU (optional)", initial_value: product.sku ?? "" },
+						{ type: "text_input", action_id: "seoTitle", label: "SEO Title (optional)", initial_value: product.seoTitle ?? "" },
+						{ type: "text_input", action_id: "seoDescription", label: "SEO Description (optional)", initial_value: product.seoDescription ?? "" },
+					],
+					submit: { label: "Save Changes", action_id: `save_product:${productId}` },
+				},
+				{ type: "divider" },
+				{ type: "actions", elements: [
+					{ type: "button", text: "Back to Products", action_id: "back_to_products" },
+				]},
+			],
+		};
+	} catch (error) {
+		ctx.log.error("Edit product error", error);
+		return { blocks: [{ type: "context", text: "Failed to load product" }] };
+	}
+}
+
+async function saveProduct(ctx: PluginContext, productId: string, values: Record<string, unknown>) {
+	try {
+		const existing = (await ctx.storage.products!.get(productId)) as Product | null;
+		if (!existing) return { ...(await buildProductsPage(ctx)), toast: { message: "Product not found", type: "error" } };
+
+		const updated = { ...existing };
+		if (typeof values.name === "string" && values.name) updated.name = values.name;
+		if (typeof values.slug === "string" && values.slug) updated.slug = values.slug;
+		if (typeof values.description === "string") updated.description = values.description;
+		if (typeof values.price === "number") updated.price = values.price;
+		if (typeof values.compareAtPrice === "number") updated.compareAtPrice = values.compareAtPrice > 0 ? values.compareAtPrice : undefined;
+		if (typeof values.inventory === "number") updated.inventory = values.inventory;
+		if (typeof values.status === "string") updated.status = values.status as Product["status"];
+		if (typeof values.type === "string") updated.type = values.type as Product["type"];
+		if (typeof values.sku === "string") updated.sku = values.sku || undefined;
+		if (typeof values.seoTitle === "string") updated.seoTitle = values.seoTitle || undefined;
+		if (typeof values.seoDescription === "string") updated.seoDescription = values.seoDescription || undefined;
+		updated.updatedAt = now();
+
+		await ctx.storage.products!.put(productId, updated);
+		return { ...(await buildProductsPage(ctx)), toast: { message: `"${updated.name}" saved`, type: "success" } };
+	} catch (error) {
+		ctx.log.error("Save product error", error);
+		return { ...(await buildProductsPage(ctx)), toast: { message: "Failed to save", type: "error" } };
+	}
 }
 
 async function buildOrdersPage(ctx: PluginContext) {
