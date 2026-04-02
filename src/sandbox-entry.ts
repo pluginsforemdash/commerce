@@ -1510,6 +1510,7 @@ export default definePlugin({
 
 		// Debug: check if settings are saved (remove after testing)
 		debug: {
+			public: true,
 			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const stripeKey = await ctx.kv.get<string>("settings:stripeSecretKey");
 				const siteUrl = await ctx.kv.get<string>("settings:siteUrl");
