@@ -1,0 +1,35 @@
+{
+	"name": "emdash-plugin-commerce",
+	"version": "0.1.0",
+	"description": "E-commerce plugin for EmDash CMS — products, cart, checkout, orders, and payments powered by Stripe",
+	"type": "module",
+	"main": "src/index.ts",
+	"exports": {
+		".": "./src/index.ts",
+		"./sandbox": "./src/sandbox-entry.ts"
+	},
+	"files": [
+		"src"
+	],
+	"keywords": [
+		"emdash",
+		"cms",
+		"plugin",
+		"ecommerce",
+		"store",
+		"shop",
+		"woocommerce",
+		"stripe",
+		"payments",
+		"cart",
+		"checkout"
+	],
+	"author": "",
+	"license": "MIT",
+	"peerDependencies": {
+		"emdash": "^0.1.0"
+	},
+	"scripts": {
+		"typecheck": "tsgo --noEmit"
+	}
+}
