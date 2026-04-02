@@ -1508,6 +1508,23 @@ export default definePlugin({
 			},
 		},
 
+		// Debug: check if settings are saved (remove after testing)
+		debug: {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
+				const stripeKey = await ctx.kv.get<string>("settings:stripeSecretKey");
+				const siteUrl = await ctx.kv.get<string>("settings:siteUrl");
+				const currency = await ctx.kv.get<string>("settings:currency");
+				const storeName = await ctx.kv.get<string>("settings:storeName");
+				return {
+					hasStripeKey: !!stripeKey,
+					stripeKeyPrefix: stripeKey ? stripeKey.slice(0, 8) + "..." : null,
+					siteUrl,
+					currency,
+					storeName,
+				};
+			},
+		},
+
 		// ══════════════════════════════════════════
 		// STRIPE CONNECT CALLBACK (Pro)
 		// ══════════════════════════════════════════
