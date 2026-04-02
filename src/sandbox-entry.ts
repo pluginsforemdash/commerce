@@ -1602,6 +1602,15 @@ export default definePlugin({
 					return buildProductsPage(ctx);
 				}
 
+				// Clear all orders
+				if (interaction.type === "block_action" && interaction.action_id === "clear_all_orders") {
+					const all = await ctx.storage.orders!.query({ limit: 1000 });
+					if (all.items.length > 0) {
+						await ctx.storage.orders!.deleteMany(all.items.map((i: { id: string }) => i.id));
+					}
+					return { ...(await buildOrdersPage(ctx)), toast: { message: `Deleted ${all.items.length} orders`, type: "success" } };
+				}
+
 				// Product delete
 				if (interaction.type === "block_action" && interaction.action_id?.startsWith("product_delete:")) {
 					const id = interaction.action_id.split(":")[1];
@@ -1923,6 +1932,14 @@ async function buildOrdersPage(ctx: PluginContext) {
 					]});
 				}
 			}
+
+			blocks.push(
+				{ type: "divider" },
+				{ type: "actions", elements: [{
+					type: "button", text: "Clear All Orders", action_id: "clear_all_orders", style: "danger",
+					confirm: { title: "Clear All Orders?", text: "This will permanently delete all orders. This cannot be undone.", confirm: "Clear All", deny: "Cancel" },
+				}]},
+			);
 		}
 
 		return { blocks };
