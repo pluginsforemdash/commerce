@@ -1565,6 +1565,29 @@ export default definePlugin({
 				if (interaction.type === "form_submit" && interaction.action_id === "create_product") return createProduct(ctx, interaction.values ?? {});
 				if (interaction.type === "form_submit" && interaction.action_id === "create_discount") return createDiscount(ctx, interaction.values ?? {});
 
+				// Product status change
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("product_status:")) {
+					const [, id, status] = interaction.action_id.split(":");
+					if (id && status) {
+						const product = (await ctx.storage.products!.get(id)) as Product | null;
+						if (product) {
+							product.status = status as Product["status"];
+							product.updatedAt = now();
+							await ctx.storage.products!.put(id, product);
+						}
+					}
+					return { ...(await buildProductsPage(ctx)), toast: { message: `Product ${status === "active" ? "activated" : "set to draft"}`, type: "success" } };
+				}
+
+				// Product delete
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("product_delete:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) {
+						await ctx.storage.products!.delete(id);
+					}
+					return { ...(await buildProductsPage(ctx)), toast: { message: "Product deleted", type: "success" } };
+				}
+
 				if (interaction.type === "block_action" && interaction.action_id?.startsWith("order_status:")) {
 					const [, id, status] = interaction.action_id.split(":");
 					if (id && status) {
@@ -1757,6 +1780,21 @@ async function buildProductsPage(ctx: PluginContext) {
 					status: p.data.status,
 				})),
 			});
+
+			// Action buttons per product
+			for (const p of products) {
+				const elements: unknown[] = [];
+				if (p.data.status === "draft") {
+					elements.push({ type: "button", text: `Activate "${p.data.name}"`, action_id: `product_status:${p.id}:active`, style: "primary" });
+				} else if (p.data.status === "active") {
+					elements.push({ type: "button", text: `Draft "${p.data.name}"`, action_id: `product_status:${p.id}:draft` });
+				}
+				elements.push({
+					type: "button", text: `Delete "${p.data.name}"`, action_id: `product_delete:${p.id}`, style: "danger",
+					confirm: { title: "Delete Product?", text: `Permanently delete ${p.data.name}?`, confirm: "Delete", deny: "Cancel" },
+				});
+				blocks.push({ type: "actions", elements });
+			}
 		}
 
 		return { blocks };
