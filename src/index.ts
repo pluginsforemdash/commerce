@@ -1,31 +1,19 @@
 /**
  * Commerce Plugin for EmDash CMS
  *
- * Run a full online store from your EmDash site.
+ * The WooCommerce alternative for EmDash. Run a full online store
+ * with products, cart, checkout, orders, customers, and analytics.
  *
- * Features:
- * - Product catalog with variants, images, and categories
- * - Shopping cart with session management
- * - Stripe-powered checkout (own keys or managed via Pro)
- * - Order management with status tracking
- * - Inventory tracking with low-stock alerts
- * - Customer records from orders
- * - Discount codes (percentage or fixed amount)
- * - Tax and shipping configuration
- * - Order notification emails
- * - Dashboard with revenue stats
+ * ## Tiers
  *
- * Standard format — works in both trusted and sandboxed modes.
+ * **Free** — Full store, your own Stripe keys, unlimited products & orders.
  *
- * ## Pricing Tiers
- *
- * - **Free**: Bring your own Stripe API keys. 0% transaction fee.
- * - **Pro ($10/mo)**: Managed Stripe via pluginsforemdash.com. Includes
- *   order notification emails. No transaction fee.
+ * **Pro ($19/mo + 1.5% transaction fee)** — Stripe Connect (no key setup),
+ * customer order/shipping emails, abandoned cart recovery, analytics
+ * dashboard, digital downloads, WooCommerce CSV import, multi-currency.
  *
  * @example
  * ```typescript
- * // astro.config.mjs
  * import { commercePlugin } from "emdash-plugin-commerce";
  *
  * export default defineConfig({
@@ -41,7 +29,7 @@
 import type { PluginDescriptor } from "emdash";
 
 export interface CommercePluginOptions {
-	/** Currency code (default: "usd") */
+	/** Default currency code (default: "usd") */
 	currency?: string;
 }
 
@@ -50,35 +38,51 @@ export function commercePlugin(
 ): PluginDescriptor<CommercePluginOptions> {
 	return {
 		id: "commerce",
-		version: "0.1.0",
+		version: "0.2.0",
 		format: "standard",
 		entrypoint: "emdash-plugin-commerce/sandbox",
 		options,
-		capabilities: ["network:fetch", "email:send", "read:users"],
-		allowedHosts: ["api.stripe.com", "api.pluginsforemdash.com"],
+		capabilities: ["network:fetch", "email:send", "read:users", "read:content"],
+		allowedHosts: [
+			"api.stripe.com",
+			"api.pluginsforemdash.com",
+			"connect.stripe.com",
+		],
 		storage: {
 			products: {
-				indexes: ["slug", "status", "categoryId", "createdAt", "price"],
+				indexes: [
+					"slug", "status", "categoryId", "createdAt", "price",
+					"type", // physical, digital
+					["categoryId", "createdAt"],
+					["status", "createdAt"],
+				],
 			},
 			categories: {
 				indexes: ["slug", "parentId", "sortOrder"],
 			},
 			orders: {
-				indexes: ["status", "customerEmail", "createdAt", "stripePaymentId"],
-			},
-			orderItems: {
-				indexes: ["orderId", "productId"],
+				indexes: [
+					"status", "customerEmail", "createdAt", "stripePaymentId",
+					["status", "createdAt"],
+					["customerEmail", "createdAt"],
+				],
 			},
 			customers: {
-				indexes: ["email", "createdAt"],
+				indexes: ["email", "createdAt", "totalSpent"],
 				uniqueIndexes: ["email"],
 			},
 			carts: {
-				indexes: ["sessionId", "updatedAt"],
+				indexes: ["sessionId", "updatedAt", "customerEmail"],
 			},
 			discounts: {
 				indexes: ["code", "status", "expiresAt"],
 				uniqueIndexes: ["code"],
+			},
+			downloads: {
+				indexes: ["orderId", "productId", "token", "expiresAt"],
+			},
+			analytics: {
+				indexes: ["date", "type"],
 			},
 		},
 		adminPages: [
@@ -87,6 +91,7 @@ export function commercePlugin(
 			{ path: "/orders", label: "Orders", icon: "inbox" },
 			{ path: "/customers", label: "Customers", icon: "users" },
 			{ path: "/discounts", label: "Discounts", icon: "tag" },
+			{ path: "/analytics", label: "Analytics", icon: "chart" },
 			{ path: "/settings", label: "Settings", icon: "gear" },
 		],
 		adminWidgets: [
