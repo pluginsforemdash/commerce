@@ -121,3 +121,6 @@ export function commercePlugin(
 		adminWidgets: [],
 	};
 }
+
+// Native plugin runtime — re-export the definePlugin() default from sandbox-entry
+export { default as createPlugin, default } from "./sandbox-entry.js";
