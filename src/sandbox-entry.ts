@@ -174,6 +174,48 @@ interface License {
 	createdAt: string;
 }
 
+interface ShippingZone {
+	name: string;
+	countries: string[]; // ISO country codes, ["*"] = rest of world
+	methods: ShippingMethod[];
+	sortOrder: number;
+	createdAt: string;
+}
+
+interface ShippingMethod {
+	id: string;
+	type: "flat_rate" | "free_shipping" | "weight_based" | "price_based";
+	name: string;
+	cost: number; // cents (flat_rate), or rate per unit
+	minOrderAmount?: number; // cents, for free_shipping threshold
+	minWeight?: number; // grams
+	maxWeight?: number; // grams
+	enabled: boolean;
+}
+
+interface TaxRule {
+	country: string; // ISO code or "*"
+	state: string; // state code or "*"
+	rate: number; // percentage (e.g. 8.25)
+	name: string; // e.g. "CA Sales Tax"
+	compound: boolean; // applied on top of other taxes
+	shipping: boolean; // applies to shipping too
+	createdAt: string;
+}
+
+interface Review {
+	productId: string;
+	productName: string;
+	customerEmail: string;
+	customerName: string;
+	rating: number; // 1-5
+	title: string;
+	body: string;
+	status: "pending" | "approved" | "rejected";
+	verified: boolean; // purchased the product
+	createdAt: string;
+}
+
 interface AnalyticsEntry {
 	date: string; // YYYY-MM-DD
 	type: "daily_summary";
@@ -680,6 +722,95 @@ async function saveCart(ctx: PluginContext, cart: Cart): Promise<void> {
 	await ctx.storage.carts!.put(cart.sessionId, cart);
 }
 
+async function calculateShipping(
+	ctx: PluginContext,
+	country: string,
+	subtotal: number,
+	totalWeight: number,
+	hasPhysical: boolean,
+	freeShippingFromDiscount: boolean,
+): Promise<{ cost: number; methodName: string }> {
+	if (!hasPhysical || freeShippingFromDiscount) return { cost: 0, methodName: "Free" };
+
+	// Try shipping zones first
+	const zonesResult = await ctx.storage.shippingZones!.query({ orderBy: { sortOrder: "asc" }, limit: 50 });
+	const zones = zonesResult.items as Array<{ data: ShippingZone }>;
+
+	for (const z of zones) {
+		const zone = z.data;
+		const matchesCountry = zone.countries.includes(country) || zone.countries.includes("*");
+		if (!matchesCountry) continue;
+
+		// Find the best enabled method
+		for (const method of zone.methods.filter((m) => m.enabled)) {
+			if (method.type === "free_shipping") {
+				if (!method.minOrderAmount || subtotal >= method.minOrderAmount) {
+					return { cost: 0, methodName: method.name };
+				}
+			}
+			if (method.type === "flat_rate") {
+				return { cost: method.cost, methodName: method.name };
+			}
+			if (method.type === "weight_based") {
+				if (method.minWeight && totalWeight < method.minWeight) continue;
+				if (method.maxWeight && totalWeight > method.maxWeight) continue;
+				// cost is per 100g
+				const units = Math.ceil(totalWeight / 100);
+				return { cost: method.cost * units, methodName: method.name };
+			}
+			if (method.type === "price_based") {
+				// cost is percentage of subtotal
+				return { cost: Math.round(subtotal * (method.cost / 10000)), methodName: method.name };
+			}
+		}
+	}
+
+	// Fallback to legacy flat rate settings
+	const flatShipping = (await ctx.kv.get<number>("settings:flatShipping")) ?? 0;
+	const freeThreshold = (await ctx.kv.get<number>("settings:freeShippingThreshold")) ?? 0;
+
+	if (freeThreshold > 0 && subtotal >= freeThreshold) return { cost: 0, methodName: "Free Shipping" };
+	return { cost: flatShipping, methodName: flatShipping > 0 ? "Flat Rate" : "Free" };
+}
+
+async function calculateTax(
+	ctx: PluginContext,
+	country: string,
+	state: string,
+	subtotal: number,
+	shippingCost: number,
+): Promise<{ amount: number; breakdown: Array<{ name: string; rate: number; amount: number }> }> {
+	// Try tax rules first
+	const rulesResult = await ctx.storage.taxRules!.query({ limit: 100 });
+	const rules = rulesResult.items as Array<{ data: TaxRule }>;
+
+	const applicable = rules
+		.map((r) => r.data)
+		.filter((r) => (r.country === country || r.country === "*") && (r.state === state || r.state === "*"));
+
+	if (applicable.length > 0) {
+		let totalTax = 0;
+		const breakdown: Array<{ name: string; rate: number; amount: number }> = [];
+		let taxableAmount = subtotal;
+
+		for (const rule of applicable) {
+			const base = rule.compound ? taxableAmount + totalTax : taxableAmount;
+			const shippingTax = rule.shipping ? Math.round(shippingCost * (rule.rate / 100)) : 0;
+			const amount = Math.round(base * (rule.rate / 100)) + shippingTax;
+			totalTax += amount;
+			breakdown.push({ name: rule.name, rate: rule.rate, amount });
+		}
+
+		return { amount: totalTax, breakdown };
+	}
+
+	// Fallback to legacy single rate
+	const taxRate = (await ctx.kv.get<number>("settings:taxRate")) ?? 0;
+	if (taxRate <= 0) return { amount: 0, breakdown: [] };
+	const amount = Math.round(subtotal * (taxRate / 100));
+	return { amount, breakdown: [{ name: "Tax", rate: taxRate, amount }] };
+}
+
 async function resolveDiscount(ctx: PluginContext, code: string, subtotal: number): Promise<{ valid: boolean; amount: number; freeShipping: boolean; error?: string }> {
 	const result = await ctx.storage.discounts!.query({ where: { code: code.toUpperCase() }, limit: 1 });
 	if (result.items.length === 0) return { valid: false, amount: 0, freeShipping: false, error: "Invalid discount code" };
@@ -1006,25 +1137,36 @@ export default definePlugin({
 				if (cart.items.length === 0) throw400("Cart is empty");
 
 				const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
-				const taxRate = (await ctx.kv.get<number>("settings:taxRate")) ?? 0;
-				const flatShipping = (await ctx.kv.get<number>("settings:flatShipping")) ?? 0;
-				const freeThreshold = (await ctx.kv.get<number>("settings:freeShippingThreshold")) ?? 0;
 
 				const hasPhysical = cart.items.some((i) => i.type === "physical");
 				const subtotal = cart.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
 				const discount = cart.discountAmount ?? 0;
 				const afterDiscount = Math.max(0, subtotal - discount);
 
-				// Resolve shipping with discount
+				// Calculate total weight for weight-based shipping
+				let totalWeight = 0;
+				for (const item of cart.items) {
+					if (item.type === "physical") {
+						const prod = (await ctx.storage.products!.get(item.productId)) as Product | null;
+						totalWeight += (prod?.weight ?? 0) * item.quantity;
+					}
+				}
+
+				// Resolve discount for free shipping check
 				let discountResult = null;
 				if (cart.discountCode) {
 					discountResult = await resolveDiscount(ctx, cart.discountCode, subtotal);
 				}
 				const freeShippingFromDiscount = discountResult?.freeShipping ?? false;
-				const freeShippingFromThreshold = freeThreshold > 0 && subtotal >= freeThreshold;
-				const shipping = (!hasPhysical || freeShippingFromDiscount || freeShippingFromThreshold) ? 0 : flatShipping;
 
-				const tax = Math.round(afterDiscount * (taxRate / 100));
+				// Calculate shipping using zones
+				const shippingResult = await calculateShipping(ctx, shippingAddress.country, afterDiscount, totalWeight, hasPhysical, freeShippingFromDiscount);
+				const shipping = shippingResult.cost;
+
+				// Calculate tax using rules
+				const taxResult = await calculateTax(ctx, shippingAddress.country, shippingAddress.state, afterDiscount, shipping);
+				const tax = taxResult.amount;
+
 				const total = afterDiscount + shipping + tax;
 
 				// Verify inventory
@@ -1563,6 +1705,193 @@ export default definePlugin({
 			},
 		},
 
+		// ── Shipping Zones ──
+
+		"shipping/list": {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
+				const result = await ctx.storage.shippingZones!.query({ orderBy: { sortOrder: "asc" }, limit: 50 });
+				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as ShippingZone) })) };
+			},
+		},
+
+		"shipping/create": {
+			input: z.object({
+				name: z.string().min(1).max(100),
+				countries: z.array(z.string().min(2).max(2)).min(1),
+				methods: z.array(z.object({
+					id: z.string(),
+					type: z.enum(["flat_rate", "free_shipping", "weight_based", "price_based"]),
+					name: z.string(),
+					cost: z.number().min(0),
+					minOrderAmount: z.number().min(0).optional(),
+					minWeight: z.number().min(0).optional(),
+					maxWeight: z.number().min(0).optional(),
+					enabled: z.boolean().default(true),
+				})),
+				sortOrder: z.number().int().default(0),
+			}),
+			handler: async (routeCtx: { input: any }, ctx: PluginContext) => {
+				const id = genId();
+				await ctx.storage.shippingZones!.put(id, { ...routeCtx.input, createdAt: now() });
+				return { success: true, id };
+			},
+		},
+
+		"shipping/delete": {
+			input: idSchema,
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.shippingZones!.delete(routeCtx.input.id);
+				return { success: true };
+			},
+		},
+
+		// ── Shipping Estimate (public) ──
+
+		"storefront/shipping-estimate": {
+			public: true,
+			input: z.object({
+				sessionId: z.string().min(1),
+				country: z.string().min(2).max(2),
+			}),
+			handler: async (routeCtx: { input: { sessionId: string; country: string } }, ctx: PluginContext) => {
+				const cart = await getCart(ctx, routeCtx.input.sessionId);
+				if (cart.items.length === 0) return { shipping: 0, methodName: "Free" };
+
+				const hasPhysical = cart.items.some((i) => i.type === "physical");
+				const subtotal = cart.items.reduce((s, i) => s + i.price * i.quantity, 0);
+				let totalWeight = 0;
+				for (const item of cart.items) {
+					if (item.type === "physical") {
+						const prod = (await ctx.storage.products!.get(item.productId)) as Product | null;
+						totalWeight += (prod?.weight ?? 0) * item.quantity;
+					}
+				}
+
+				const result = await calculateShipping(ctx, routeCtx.input.country, subtotal, totalWeight, hasPhysical, false);
+				const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
+				return { shipping: result.cost, methodName: result.methodName, formatted: formatCents(result.cost, currency) };
+			},
+		},
+
+		// ── Tax Rules ──
+
+		"tax/list": {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
+				const result = await ctx.storage.taxRules!.query({ limit: 100 });
+				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as TaxRule) })) };
+			},
+		},
+
+		"tax/create": {
+			input: z.object({
+				country: z.string().min(1).max(2),
+				state: z.string().max(10).default("*"),
+				rate: z.number().min(0).max(100),
+				name: z.string().min(1).max(100),
+				compound: z.boolean().default(false),
+				shipping: z.boolean().default(false),
+			}),
+			handler: async (routeCtx: { input: any }, ctx: PluginContext) => {
+				const id = genId();
+				await ctx.storage.taxRules!.put(id, { ...routeCtx.input, createdAt: now() });
+				return { success: true, id };
+			},
+		},
+
+		"tax/delete": {
+			input: idSchema,
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.taxRules!.delete(routeCtx.input.id);
+				return { success: true };
+			},
+		},
+
+		// ── Product Reviews ──
+
+		"storefront/reviews": {
+			public: true,
+			input: z.object({ productId: z.string().min(1), limit: z.coerce.number().min(1).max(50).default(20) }),
+			handler: async (routeCtx: { input: { productId: string; limit: number } }, ctx: PluginContext) => {
+				const result = await ctx.storage.reviews!.query({
+					where: { productId: routeCtx.input.productId, status: "approved" },
+					orderBy: { createdAt: "desc" },
+					limit: routeCtx.input.limit,
+				});
+				return {
+					items: result.items.map((i: { id: string; data: unknown }) => {
+						const r = i.data as Review;
+						return { id: i.id, rating: r.rating, title: r.title, body: r.body, customerName: r.customerName, verified: r.verified, createdAt: r.createdAt };
+					}),
+				};
+			},
+		},
+
+		"storefront/reviews/submit": {
+			public: true,
+			input: z.object({
+				productId: z.string().min(1),
+				customerEmail: z.string().email(),
+				customerName: z.string().min(1).max(100),
+				rating: z.number().int().min(1).max(5),
+				title: z.string().min(1).max(200),
+				body: z.string().min(1).max(5000),
+			}),
+			handler: async (routeCtx: { input: any }, ctx: PluginContext) => {
+				if (isRateLimited(`review:${routeCtx.input.customerEmail}`, 3)) throw400("Too many reviews. Try again later.");
+
+				// Check if they purchased the product
+				const orders = await ctx.storage.orders!.query({ where: { customerEmail: routeCtx.input.customerEmail }, limit: 100 });
+				const verified = orders.items.some((o: { data: unknown }) => {
+					const order = o.data as Order;
+					return order.status !== "pending" && order.items.some((i) => i.productId === routeCtx.input.productId);
+				});
+
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
+
+				const id = genId();
+				await ctx.storage.reviews!.put(id, {
+					...routeCtx.input,
+					productName: product?.name ?? "Unknown",
+					status: "pending",
+					verified,
+					createdAt: now(),
+				});
+
+				return { success: true, id, message: "Review submitted for approval." };
+			},
+		},
+
+		"reviews/list": {
+			input: z.object({ status: z.string().optional(), limit: z.coerce.number().min(1).max(100).default(50) }),
+			handler: async (routeCtx: { input: { status?: string; limit: number } }, ctx: PluginContext) => {
+				const where = routeCtx.input.status ? { status: routeCtx.input.status } : undefined;
+				const result = await ctx.storage.reviews!.query({ where, orderBy: { createdAt: "desc" }, limit: routeCtx.input.limit });
+				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Review) })) };
+			},
+		},
+
+		"reviews/approve": {
+			input: idSchema,
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				const review = (await ctx.storage.reviews!.get(routeCtx.input.id)) as Review | null;
+				if (!review) throw404("Review not found");
+				review.status = "approved";
+				await ctx.storage.reviews!.put(routeCtx.input.id, review);
+				return { success: true };
+			},
+		},
+
+		"reviews/reject": {
+			input: idSchema,
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				const review = (await ctx.storage.reviews!.get(routeCtx.input.id)) as Review | null;
+				if (!review) throw404("Review not found");
+				review.status = "rejected";
+				await ctx.storage.reviews!.put(routeCtx.input.id, review);
+				return { success: true };
+			},
+		},
+
 		// ── Analytics (Pro) ──
 
 		"analytics/summary": {
@@ -1773,6 +2102,7 @@ export default definePlugin({
 				if (interaction.type === "page_load" && interaction.page === "/orders") return buildOrdersPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/customers") return buildCustomersPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/discounts") return buildDiscountsPage(ctx);
+				if (interaction.type === "page_load" && interaction.page === "/shipping") return buildShippingPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/licenses") return buildLicensesPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/analytics") return buildAnalyticsPage(ctx);
 				if (interaction.type === "page_load" && interaction.page === "/settings") return buildSettingsPage(ctx);
@@ -1781,6 +2111,68 @@ export default definePlugin({
 				if (interaction.type === "form_submit" && interaction.action_id === "save_settings") return saveSettings(ctx, interaction.values ?? {});
 				if (interaction.type === "form_submit" && interaction.action_id === "create_product") return createProduct(ctx, interaction.values ?? {});
 				if (interaction.type === "form_submit" && interaction.action_id === "create_discount") return createDiscount(ctx, interaction.values ?? {});
+
+				// Shipping zone create
+				if (interaction.type === "form_submit" && interaction.action_id === "create_shipping_zone") {
+					const v = interaction.values ?? {};
+					const zoneName = v.zoneName as string;
+					const countries = (v.countries as string || "").split(",").map((c: string) => c.trim().toUpperCase()).filter(Boolean);
+					const methodType = v.methodType as string;
+					const methodCost = Number(v.methodCost) || 0;
+					const freeShippingMin = Number(v.freeShippingMin) || 0;
+
+					if (!zoneName || countries.length === 0) {
+						return { ...(await buildShippingPage(ctx)), toast: { message: "Name and countries required", type: "error" } };
+					}
+
+					await ctx.storage.shippingZones!.put(genId(), {
+						name: zoneName,
+						countries,
+						methods: [{
+							id: genId(),
+							type: methodType as ShippingMethod["type"],
+							name: methodType === "free_shipping" ? "Free Shipping" : methodType === "weight_based" ? "Weight Based" : "Flat Rate",
+							cost: methodCost,
+							minOrderAmount: freeShippingMin > 0 ? freeShippingMin : undefined,
+							enabled: true,
+						}],
+						sortOrder: 0,
+						createdAt: now(),
+					});
+					return { ...(await buildShippingPage(ctx)), toast: { message: `Zone "${zoneName}" created`, type: "success" } };
+				}
+
+				// Tax rule create
+				if (interaction.type === "form_submit" && interaction.action_id === "create_tax_rule") {
+					const v = interaction.values ?? {};
+					const taxName = v.taxName as string;
+					const taxCountry = (v.taxCountry as string || "*").toUpperCase();
+					const taxState = (v.taxState as string || "*").toUpperCase();
+					const taxRate = Number(v.taxRate) || 0;
+					const taxOnShipping = v.taxOnShipping === true;
+
+					if (!taxName) return { ...(await buildShippingPage(ctx)), toast: { message: "Tax name required", type: "error" } };
+
+					await ctx.storage.taxRules!.put(genId(), {
+						country: taxCountry, state: taxState, rate: taxRate,
+						name: taxName, compound: false, shipping: taxOnShipping, createdAt: now(),
+					});
+					return { ...(await buildShippingPage(ctx)), toast: { message: `Tax rule "${taxName}" created`, type: "success" } };
+				}
+
+				// Shipping zone delete
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("shipping_delete:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) await ctx.storage.shippingZones!.delete(id);
+					return { ...(await buildShippingPage(ctx)), toast: { message: "Zone deleted", type: "success" } };
+				}
+
+				// Tax rule delete
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("tax_delete:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) await ctx.storage.taxRules!.delete(id);
+					return { ...(await buildShippingPage(ctx)), toast: { message: "Tax rule deleted", type: "success" } };
+				}
 
 				// Back to products list
 				if (interaction.type === "block_action" && interaction.action_id === "back_to_products") {
@@ -2326,6 +2718,106 @@ async function buildDiscountsPage(ctx: PluginContext) {
 		}
 		return { blocks };
 	} catch (error) { ctx.log.error("Discounts page error", error); return { blocks: [{ type: "context", text: "Failed to load discounts" }] }; }
+}
+
+async function buildShippingPage(ctx: PluginContext) {
+	try {
+		const zones = await ctx.storage.shippingZones!.query({ orderBy: { sortOrder: "asc" }, limit: 50 });
+		const taxRules = await ctx.storage.taxRules!.query({ limit: 100 });
+
+		const blocks: unknown[] = [
+			{ type: "header", text: "Shipping & Tax" },
+			{ type: "section", text: "**Shipping Zones**" },
+			{ type: "context", text: "Zones are matched top to bottom by country. First match wins. Use '*' for rest-of-world." },
+		];
+
+		if (zones.items.length === 0) {
+			blocks.push({ type: "context", text: "No shipping zones. Using legacy flat rate from Settings." });
+		} else {
+			for (const z of zones.items as Array<{ id: string; data: ShippingZone }>) {
+				const zone = z.data;
+				const methodLines = zone.methods.map((m) => {
+					const cost = m.type === "free_shipping" ? "Free" + (m.minOrderAmount ? ` (over ${formatCents(m.minOrderAmount, "usd")})` : "") :
+						m.type === "weight_based" ? `${formatCents(m.cost, "usd")}/100g` :
+						formatCents(m.cost, "usd");
+					return `${m.name} (${m.type}): ${cost}${m.enabled ? "" : " [disabled]"}`;
+				}).join(" | ");
+
+				blocks.push(
+					{ type: "fields", fields: [
+						{ label: zone.name, value: `Countries: ${zone.countries.join(", ")}` },
+						{ label: "Methods", value: methodLines || "None" },
+					]},
+					{ type: "actions", elements: [{
+						type: "button", text: "Delete Zone", action_id: `shipping_delete:${z.id}`, style: "danger",
+						confirm: { title: "Delete Zone?", text: `Delete shipping zone "${zone.name}"?`, confirm: "Delete", deny: "Cancel" },
+					}]},
+				);
+			}
+		}
+
+		// Quick add zone form
+		blocks.push(
+			{ type: "divider" },
+			{ type: "form", block_id: "add-shipping-zone", fields: [
+				{ type: "text_input", action_id: "zoneName", label: "Zone Name (e.g. 'United States')" },
+				{ type: "text_input", action_id: "countries", label: "Country Codes (comma-separated, e.g. 'US,CA' or '*')" },
+				{ type: "select", action_id: "methodType", label: "Shipping Method", options: [
+					{ label: "Flat Rate", value: "flat_rate" },
+					{ label: "Free Shipping", value: "free_shipping" },
+					{ label: "Weight Based (per 100g)", value: "weight_based" },
+				]},
+				{ type: "number_input", action_id: "methodCost", label: "Cost (cents, or 0 for free shipping)", min: 0 },
+				{ type: "number_input", action_id: "freeShippingMin", label: "Free Shipping Min Order (cents, 0 = always free)", min: 0 },
+			], submit: { label: "Add Shipping Zone", action_id: "create_shipping_zone" }},
+		);
+
+		// Tax Rules
+		blocks.push(
+			{ type: "divider" },
+			{ type: "section", text: "**Tax Rules**" },
+			{ type: "context", text: "Tax is calculated based on the shipping country/state. Use '*' for any." },
+		);
+
+		if (taxRules.items.length === 0) {
+			blocks.push({ type: "context", text: "No tax rules. Using legacy single rate from Settings." });
+		} else {
+			blocks.push({
+				type: "table",
+				columns: [
+					{ key: "name", label: "Name" }, { key: "country", label: "Country" },
+					{ key: "state", label: "State" }, { key: "rate", label: "Rate" },
+					{ key: "shipping", label: "On Shipping" },
+				],
+				rows: (taxRules.items as Array<{ id: string; data: TaxRule }>).map((t) => ({
+					name: t.data.name, country: t.data.country, state: t.data.state,
+					rate: `${t.data.rate}%`, shipping: t.data.shipping ? "Yes" : "No",
+				})),
+			});
+
+			for (const t of taxRules.items as Array<{ id: string; data: TaxRule }>) {
+				blocks.push({ type: "actions", elements: [{
+					type: "button", text: `Delete "${t.data.name}"`, action_id: `tax_delete:${t.id}`, style: "danger",
+				}]});
+			}
+		}
+
+		blocks.push(
+			{ type: "divider" },
+			{ type: "form", block_id: "add-tax-rule", fields: [
+				{ type: "text_input", action_id: "taxName", label: "Tax Name (e.g. 'US Sales Tax')" },
+				{ type: "text_input", action_id: "taxCountry", label: "Country Code (e.g. 'US' or '*')" },
+				{ type: "text_input", action_id: "taxState", label: "State Code (e.g. 'CA' or '*')" },
+				{ type: "number_input", action_id: "taxRate", label: "Rate (%)", min: 0, max: 100 },
+				{ type: "toggle", action_id: "taxOnShipping", label: "Apply to Shipping" },
+			], submit: { label: "Add Tax Rule", action_id: "create_tax_rule" }},
+		);
+
+		return { blocks };
+	} catch (error) {
+		ctx.log.error("Shipping page error", error);
+		return { blocks: [{ type: "context", text: "Failed to load shipping settings" }] };
+	}
 }
 
 async function buildLicensesPage(ctx: PluginContext) {

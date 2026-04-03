@@ -88,6 +88,15 @@ export function commercePlugin(
 				indexes: ["orderId", "customerEmail", "productId", "key", "status", "createdAt"],
 				uniqueIndexes: ["key"],
 			},
+			shippingZones: {
+				indexes: ["sortOrder"],
+			},
+			taxRules: {
+				indexes: ["country", "state"],
+			},
+			reviews: {
+				indexes: ["productId", "status", "rating", "createdAt"],
+			},
 			analytics: {
 				indexes: ["date", "type"],
 			},
@@ -98,6 +107,7 @@ export function commercePlugin(
 			{ path: "/orders", label: "Orders", icon: "inbox" },
 			{ path: "/customers", label: "Customers", icon: "users" },
 			{ path: "/discounts", label: "Discounts", icon: "tag" },
+			{ path: "/shipping", label: "Shipping", icon: "send" },
 			{ path: "/licenses", label: "Licenses", icon: "tag" },
 			{ path: "/analytics", label: "Analytics", icon: "chart" },
 			{ path: "/settings", label: "Settings", icon: "gear" },
