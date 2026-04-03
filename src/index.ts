@@ -122,5 +122,11 @@ export function commercePlugin(
 	};
 }
 
-// Native plugin runtime — re-export the definePlugin() default from sandbox-entry
-export { default as createPlugin, default } from "./sandbox-entry.js";
+// Native plugin runtime
+import sandboxPlugin from "./sandbox-entry.js";
+
+export function createPlugin() {
+	return sandboxPlugin;
+}
+
+export default createPlugin;
