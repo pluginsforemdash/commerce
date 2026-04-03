@@ -966,6 +966,20 @@ export default definePlugin({
 	capabilities: ["network:fetch", "email:send", "read:users", "read:content"],
 	allowedHosts: ["api.stripe.com", "api.pluginsforemdash.com", "connect.stripe.com"],
 
+	admin: {
+		pages: [
+			{ path: "/", label: "Dashboard", icon: "chart" },
+			{ path: "/products", label: "Products", icon: "list" },
+			{ path: "/orders", label: "Orders", icon: "inbox" },
+			{ path: "/customers", label: "Customers", icon: "users" },
+			{ path: "/discounts", label: "Discounts", icon: "tag" },
+			{ path: "/shipping", label: "Shipping", icon: "send" },
+			{ path: "/licenses", label: "Licenses", icon: "tag" },
+			{ path: "/settings", label: "Settings", icon: "gear" },
+		],
+		widgets: [],
+	},
+
 	hooks: {
 		"plugin:install": {
 			handler: async (_event: unknown, ctx: PluginContext) => {
