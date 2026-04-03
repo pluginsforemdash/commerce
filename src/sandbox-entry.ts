@@ -31,6 +31,8 @@ interface Product {
 	variants: Variant[];
 	sku?: string;
 	inventory: number; // -1 = unlimited
+	lowStockThreshold?: number; // alert when inventory drops to this
+	backordersAllowed: boolean; // allow purchases when out of stock
 	weight?: number; // grams
 	downloadUrl?: string; // for digital products (Pro)
 	downloadLimit?: number; // max downloads per order
@@ -203,6 +205,14 @@ interface TaxRule {
 	createdAt: string;
 }
 
+interface StockNotification {
+	productId: string;
+	productName: string;
+	email: string;
+	notified: boolean;
+	createdAt: string;
+}
+
 interface OrderNote {
 	orderId: string;
 	type: "admin" | "system" | "customer_visible";
@@ -258,6 +268,8 @@ const productCreateSchema = z.object({
 	})).default([]),
 	sku: z.string().max(100).optional(),
 	inventory: z.number().int().default(-1),
+	lowStockThreshold: z.number().int().min(0).optional(),
+	backordersAllowed: z.boolean().default(false),
 	weight: z.number().min(0).optional(),
 	downloadUrl: z.string().optional(),
 	downloadLimit: z.number().int().min(1).optional(),
@@ -819,6 +831,38 @@ async function calculateTax(
 	return { amount, breakdown: [{ name: "Tax", rate: taxRate, amount }] };
 }
 
+function getStockStatus(product: Product): { status: "in_stock" | "low_stock" | "out_of_stock" | "on_backorder" | "unlimited"; display: string } {
+	if (product.inventory === -1) return { status: "unlimited", display: "In Stock" };
+	if (product.inventory === 0) {
+		if (product.backordersAllowed) return { status: "on_backorder", display: "Available on Backorder" };
+		return { status: "out_of_stock", display: "Out of Stock" };
+	}
+	const threshold = product.lowStockThreshold ?? 5;
+	if (product.inventory <= threshold) return { status: "low_stock", display: `Low Stock — ${product.inventory} left` };
+	return { status: "in_stock", display: "In Stock" };
+}
+
+async function sendStockNotifications(ctx: PluginContext, productId: string, productName: string): Promise<void> {
+	const result = await ctx.storage.stockNotifications!.query({
+		where: { productId, notified: false },
+		limit: 100,
+	});
+
+	for (const item of result.items) {
+		const notif = item.data as StockNotification;
+		await sendEmail(ctx, notif.email,
+			`${productName} is back in stock!`,
+			`Good news — ${productName} is back in stock.\n\nShop now before it sells out again.`,
+		).catch(() => {});
+		notif.notified = true;
+		await ctx.storage.stockNotifications!.put(item.id, notif);
+	}
+
+	if (result.items.length > 0) {
+		ctx.log.info(`Sent ${result.items.length} back-in-stock notifications for ${productName}`);
+	}
+}
+
 async function addOrderNote(ctx: PluginContext, orderId: string, type: OrderNote["type"], message: string, author?: string): Promise<void> {
 	await ctx.storage.orderNotes!.put(genId(), {
 		orderId, type, message, author: author ?? "system", createdAt: now(),
@@ -1014,6 +1058,8 @@ export default definePlugin({
 					const maxPrice = Math.max(...allPrices);
 					const hasVariablePrice = minPrice !== maxPrice;
 
+					const stock = getStockStatus(p);
+
 					return {
 						id: i.id, name: p.name, slug: p.slug, description: p.description,
 						shortDescription: p.shortDescription, price: p.price,
@@ -1022,6 +1068,9 @@ export default definePlugin({
 						inventory: p.inventory, type: p.type,
 						seoTitle: p.seoTitle, seoDescription: p.seoDescription,
 						priceRange: hasVariablePrice ? { min: minPrice, max: maxPrice } : null,
+						stockStatus: stock.status,
+						stockDisplay: stock.display,
+						backordersAllowed: p.backordersAllowed,
 					};
 				});
 
@@ -1097,9 +1146,11 @@ export default definePlugin({
 					if (!variant) throw404("Variant not found");
 					if (variant.price !== undefined) resolvedPrice = variant.price;
 					resolvedName = `${productData.name} — ${variant.name}`;
-					if (variant.inventory !== -1 && variant.inventory < quantity) throw400(`Only ${variant.inventory} left in stock`);
-				} else if (productData.inventory !== -1 && productData.inventory < quantity) {
-					throw400(`Only ${productData.inventory} left in stock`);
+					if (variant.inventory !== -1 && variant.inventory < quantity && !productData.backordersAllowed) {
+						throw400(variant.inventory === 0 ? `${resolvedName} is out of stock` : `Only ${variant.inventory} left in stock`);
+					}
+				} else if (productData.inventory !== -1 && productData.inventory < quantity && !productData.backordersAllowed) {
+					throw400(productData.inventory === 0 ? `${productData.name} is out of stock` : `Only ${productData.inventory} left in stock`);
 				}
 
 				const cart = await getCart(ctx, sessionId);
@@ -1215,11 +1266,13 @@ export default definePlugin({
 				for (const item of cart.items) {
 					const product = (await ctx.storage.products!.get(item.productId)) as Product | null;
 					if (!product || product.status !== "active") throw400(`${item.name} is no longer available`);
-					if (item.variantId) {
-						const variant = product.variants.find((v) => v.id === item.variantId);
-						if (variant && variant.inventory !== -1 && variant.inventory < item.quantity) throw400(`Not enough stock for ${item.name}`);
-					} else if (product.inventory !== -1 && product.inventory < item.quantity) {
-						throw400(`Not enough stock for ${item.name}`);
+					if (!product.backordersAllowed) {
+						if (item.variantId) {
+							const variant = product.variants.find((v) => v.id === item.variantId);
+							if (variant && variant.inventory !== -1 && variant.inventory < item.quantity) throw400(`Not enough stock for ${item.name}`);
+						} else if (product.inventory !== -1 && product.inventory < item.quantity) {
+							throw400(`Not enough stock for ${item.name}`);
+						}
 					}
 				}
 
@@ -1698,10 +1751,11 @@ export default definePlugin({
 				order.updatedAt = now();
 				await ctx.storage.orders!.put(routeCtx.input.id, order);
 
-				// Restore inventory
+				// Restore inventory and notify waitlist
 				for (const item of order.items) {
 					const product = (await ctx.storage.products!.get(item.productId)) as Product | null;
 					if (!product) continue;
+					const wasOutOfStock = product.inventory === 0;
 					if (item.variantId) {
 						const variant = product.variants.find((v) => v.id === item.variantId);
 						if (variant && variant.inventory !== -1) variant.inventory += item.quantity;
@@ -1710,6 +1764,9 @@ export default definePlugin({
 					}
 					product.updatedAt = now();
 					await ctx.storage.products!.put(item.productId, product);
+					if (wasOutOfStock && product.inventory > 0) {
+						sendStockNotifications(ctx, item.productId, product.name).catch(() => {});
+					}
 				}
 
 				await addOrderNote(ctx, routeCtx.input.id, "system", `Refunded via Stripe${routeCtx.input.reason ? ": " + routeCtx.input.reason : ""}`).catch(() => {});
@@ -1831,6 +1888,65 @@ export default definePlugin({
 		},
 
 		// ── Shipping Estimate (public) ──
+
+		// ── Stock Notifications ──
+
+		"storefront/notify-restock": {
+			public: true,
+			input: z.object({
+				productId: z.string().min(1),
+				email: z.string().email(),
+			}),
+			handler: async (routeCtx: { input: { productId: string; email: string } }, ctx: PluginContext) => {
+				if (isRateLimited(`restock:${routeCtx.input.email}`, 5)) throw400("Too many requests");
+
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
+				if (!product) throw404("Product not found");
+
+				// Check if already registered
+				const existing = await ctx.storage.stockNotifications!.query({
+					where: { productId: routeCtx.input.productId, email: routeCtx.input.email },
+					limit: 1,
+				});
+				if (existing.items.length > 0) {
+					return { success: true, message: "You're already on the notification list." };
+				}
+
+				await ctx.storage.stockNotifications!.put(genId(), {
+					productId: routeCtx.input.productId,
+					productName: product.name,
+					email: routeCtx.input.email,
+					notified: false,
+					createdAt: now(),
+				});
+
+				return { success: true, message: "We'll email you when this product is back in stock." };
+			},
+		},
+
+		// ── Stock Status (public) ──
+
+		"storefront/stock": {
+			public: true,
+			input: z.object({ productId: z.string().min(1) }),
+			handler: async (routeCtx: { input: { productId: string } }, ctx: PluginContext) => {
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
+				if (!product) throw404("Product not found");
+
+				const stock = getStockStatus(product);
+				return {
+					...stock,
+					inventory: product.inventory === -1 ? null : product.inventory,
+					backordersAllowed: product.backordersAllowed,
+					variants: product.variants.map((v) => ({
+						id: v.id,
+						name: v.name,
+						inventory: v.inventory === -1 ? null : v.inventory,
+						status: v.inventory === -1 ? "unlimited" : v.inventory === 0 ? (product.backordersAllowed ? "on_backorder" : "out_of_stock") : v.inventory <= (product.lowStockThreshold ?? 5) ? "low_stock" : "in_stock",
+					})),
+				};
+			},
+		},
 
 		"storefront/shipping-estimate": {
 			public: true,
@@ -2569,14 +2685,19 @@ async function buildProductsPage(ctx: PluginContext) {
 				type: "table",
 				columns: [
 					{ key: "name", label: "Name" }, { key: "slug", label: "Slug" },
-					{ key: "price", label: "Price" }, { key: "type", label: "Type" },
+					{ key: "price", label: "Price" }, { key: "stock", label: "Stock" },
+					{ key: "type", label: "Type" },
 					{ key: "status", label: "Status", format: "badge" },
 				],
-				rows: products.map((p) => ({
-					name: p.data.name, slug: p.data.slug,
-					price: formatCents(p.data.price, currency),
-					type: p.data.type ?? "physical", status: p.data.status,
-				})),
+				rows: products.map((p) => {
+					const stock = getStockStatus(p.data);
+					return {
+						name: p.data.name, slug: p.data.slug,
+						price: formatCents(p.data.price, currency),
+						stock: stock.display,
+						type: p.data.type ?? "physical", status: p.data.status,
+					};
+				}),
 			});
 
 			for (const p of products) {
@@ -2624,6 +2745,9 @@ async function buildProductEditPage(ctx: PluginContext, productId: string) {
 						]},
 						{ type: "text_input", action_id: "sku", label: "SKU (optional)", initial_value: product.sku ?? "" },
 						{ type: "text_input", action_id: "seoTitle", label: "SEO Title (optional)", initial_value: product.seoTitle ?? "" },
+						{ type: "number_input", action_id: "lowStockThreshold", label: "Low Stock Threshold (alert when below)", initial_value: product.lowStockThreshold ?? 5, min: 0 },
+						{ type: "toggle", action_id: "backordersAllowed", label: "Allow Backorders (sell when out of stock)", initial_value: product.backordersAllowed ?? false },
+						{ type: "number_input", action_id: "weight", label: "Weight (grams, for shipping)", initial_value: product.weight ?? 0, min: 0 },
 						{ type: "text_input", action_id: "seoDescription", label: "SEO Description (optional)", initial_value: product.seoDescription ?? "" },
 					],
 					submit: { label: "Save Changes", action_id: `save_product:${productId}` },
@@ -2656,6 +2780,9 @@ async function saveProduct(ctx: PluginContext, productId: string, values: Record
 		if (typeof values.type === "string") updated.type = values.type as Product["type"];
 		if (typeof values.sku === "string") updated.sku = values.sku || undefined;
 		if (typeof values.seoTitle === "string") updated.seoTitle = values.seoTitle || undefined;
+		if (typeof values.lowStockThreshold === "number") updated.lowStockThreshold = values.lowStockThreshold;
+		if (typeof values.backordersAllowed === "boolean") updated.backordersAllowed = values.backordersAllowed;
+		if (typeof values.weight === "number") updated.weight = values.weight > 0 ? values.weight : undefined;
 		if (typeof values.seoDescription === "string") updated.seoDescription = values.seoDescription || undefined;
 		updated.updatedAt = now();
 

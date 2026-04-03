@@ -100,6 +100,9 @@ export function commercePlugin(
 			orderNotes: {
 				indexes: ["orderId", "createdAt"],
 			},
+			stockNotifications: {
+				indexes: ["productId", "email", "notified"],
+			},
 			analytics: {
 				indexes: ["date", "type"],
 			},
