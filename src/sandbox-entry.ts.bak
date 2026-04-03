@@ -1077,8 +1077,8 @@ export default definePlugin({
 				limit: z.coerce.number().min(1).max(50).default(20),
 				cursor: z.string().optional(),
 			}),
-			handler: async (ctx: any) => {
-				const { category, search, limit, cursor } = ctx.input;
+			handler: async (routeCtx: { input: { category?: string; search?: string; limit: number; cursor?: string } }, ctx: PluginContext) => {
+				const { category, search, limit, cursor } = routeCtx.input;
 				const where: Record<string, unknown> = { status: "active" };
 				if (category) where.categoryId = category;
 
@@ -1131,8 +1131,8 @@ export default definePlugin({
 		"storefront/product": {
 			public: true,
 			input: z.object({ slug: z.string().min(1) }),
-			handler: async (ctx: any) => {
-				const result = await ctx.storage.products!.query({ where: { slug: ctx.input.slug, status: "active" }, limit: 1 });
+			handler: async (routeCtx: { input: { slug: string } }, ctx: PluginContext) => {
+				const result = await ctx.storage.products!.query({ where: { slug: routeCtx.input.slug, status: "active" }, limit: 1 });
 				if (result.items.length === 0) throw404("Product not found");
 				const item = result.items[0]!;
 				const p = item.data as Product;
@@ -1142,7 +1142,7 @@ export default definePlugin({
 
 		"storefront/categories": {
 			public: true,
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const result = await ctx.storage.categories!.query({ orderBy: { sortOrder: "asc" }, limit: 100 });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Category) })) };
 			},
@@ -1153,8 +1153,8 @@ export default definePlugin({
 		"storefront/cart": {
 			public: true,
 			input: z.object({ sessionId: z.string().min(1) }),
-			handler: async (ctx: any) => {
-				const cart = await getCart(ctx, ctx.input.sessionId);
+			handler: async (routeCtx: { input: { sessionId: string } }, ctx: PluginContext) => {
+				const cart = await getCart(ctx, routeCtx.input.sessionId);
 				const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
 				const subtotal = cart.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
 				return {
@@ -1169,8 +1169,8 @@ export default definePlugin({
 		"storefront/cart/add": {
 			public: true,
 			input: cartAddSchema,
-			handler: async (ctx: any) => {
-				const { sessionId, productId, variantId, quantity } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof cartAddSchema> }, ctx: PluginContext) => {
+				const { sessionId, productId, variantId, quantity } = routeCtx.input;
 				const productData = (await ctx.storage.products!.get(productId)) as Product | null;
 				if (!productData || productData.status !== "active") throw404("Product not found");
 
@@ -1209,8 +1209,8 @@ export default definePlugin({
 		"storefront/cart/update": {
 			public: true,
 			input: cartUpdateSchema,
-			handler: async (ctx: any) => {
-				const { sessionId, productId, variantId, quantity } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof cartUpdateSchema> }, ctx: PluginContext) => {
+				const { sessionId, productId, variantId, quantity } = routeCtx.input;
 				const cart = await getCart(ctx, sessionId);
 
 				if (quantity === 0) {
@@ -1228,9 +1228,9 @@ export default definePlugin({
 		"storefront/cart/email": {
 			public: true,
 			input: cartEmailSchema,
-			handler: async (ctx: any) => {
-				const cart = await getCart(ctx, ctx.input.sessionId);
-				cart.customerEmail = ctx.input.email;
+			handler: async (routeCtx: { input: z.infer<typeof cartEmailSchema> }, ctx: PluginContext) => {
+				const cart = await getCart(ctx, routeCtx.input.sessionId);
+				cart.customerEmail = routeCtx.input.email;
 				await saveCart(ctx, cart);
 				return { success: true };
 			},
@@ -1239,8 +1239,8 @@ export default definePlugin({
 		"storefront/cart/discount": {
 			public: true,
 			input: cartDiscountSchema,
-			handler: async (ctx: any) => {
-				const { sessionId, code } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof cartDiscountSchema> }, ctx: PluginContext) => {
+				const { sessionId, code } = routeCtx.input;
 				const cart = await getCart(ctx, sessionId);
 				const subtotal = cart.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
 				const result = await resolveDiscount(ctx, code, subtotal, cart.items);
@@ -1258,8 +1258,8 @@ export default definePlugin({
 		"storefront/checkout": {
 			public: true,
 			input: checkoutSchema,
-			handler: async (ctx: any) => {
-				const { sessionId, customerEmail, customerName, shippingAddress, billingAddress } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof checkoutSchema> }, ctx: PluginContext) => {
+				const { sessionId, customerEmail, customerName, shippingAddress, billingAddress } = routeCtx.input;
 				if (isRateLimited(`checkout:${customerEmail}`)) throw400("Too many checkout attempts. Try again shortly.");
 
 				const cart = await getCart(ctx, sessionId);
@@ -1389,8 +1389,8 @@ export default definePlugin({
 
 		"storefront/webhook/stripe": {
 			public: true,
-			handler: async (ctx: any) => {
-				const payload = ctx.input as Record<string, unknown>;
+			handler: async (routeCtx: { input: unknown }, ctx: PluginContext) => {
+				const payload = routeCtx.input as Record<string, unknown>;
 				const type = payload.type as string;
 
 				if (type === "checkout.session.completed") {
@@ -1543,8 +1543,8 @@ export default definePlugin({
 		download: {
 			public: true,
 			input: z.object({ token: z.string().min(1) }),
-			handler: async (ctx: any) => {
-				const result = await ctx.storage.downloads!.query({ where: { token: ctx.input.token }, limit: 1 });
+			handler: async (routeCtx: { input: { token: string } }, ctx: PluginContext) => {
+				const result = await ctx.storage.downloads!.query({ where: { token: routeCtx.input.token }, limit: 1 });
 				if (result.items.length === 0) throw404("Download not found");
 
 				const dl = result.items[0]!.data as Download;
@@ -1568,9 +1568,9 @@ export default definePlugin({
 		"storefront/order": {
 			public: true,
 			input: z.object({ orderNumber: z.string().min(1), email: z.string().email() }),
-			handler: async (ctx: any) => {
-				const result = await ctx.storage.orders!.query({ where: { customerEmail: ctx.input.email }, limit: 100 });
-				const match = result.items.find((i: { data: unknown }) => (i.data as Order).orderNumber === ctx.input.orderNumber);
+			handler: async (routeCtx: { input: { orderNumber: string; email: string } }, ctx: PluginContext) => {
+				const result = await ctx.storage.orders!.query({ where: { customerEmail: routeCtx.input.email }, limit: 100 });
+				const match = result.items.find((i: { data: unknown }) => (i.data as Order).orderNumber === routeCtx.input.orderNumber);
 				if (!match) throw404("Order not found");
 				const order = match.data as Order;
 				return {
@@ -1589,8 +1589,8 @@ export default definePlugin({
 
 		"products/list": {
 			input: listSchema,
-			handler: async (ctx: any) => {
-				const { limit, cursor, status } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof listSchema> }, ctx: PluginContext) => {
+				const { limit, cursor, status } = routeCtx.input;
 				const where = status ? { status } : undefined;
 				const result = await ctx.storage.products!.query({ where, orderBy: { createdAt: "desc" }, limit, cursor });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Product) })), cursor: result.cursor, hasMore: result.hasMore };
@@ -1599,11 +1599,11 @@ export default definePlugin({
 
 		"products/create": {
 			input: productCreateSchema,
-			handler: async (ctx: any) => {
-				const existing = await ctx.storage.products!.query({ where: { slug: ctx.input.slug }, limit: 1 });
+			handler: async (routeCtx: { input: z.infer<typeof productCreateSchema> }, ctx: PluginContext) => {
+				const existing = await ctx.storage.products!.query({ where: { slug: routeCtx.input.slug }, limit: 1 });
 				if (existing.items.length > 0) throw400("A product with this slug already exists");
 				const id = genId();
-				const product: Product = { ...ctx.input, createdAt: now(), updatedAt: now() };
+				const product: Product = { ...routeCtx.input, createdAt: now(), updatedAt: now() };
 				await ctx.storage.products!.put(id, product);
 				return { success: true, id, product: { id, ...product } };
 			},
@@ -1611,8 +1611,8 @@ export default definePlugin({
 
 		"products/update": {
 			input: productUpdateSchema,
-			handler: async (ctx: any) => {
-				const { id, ...updates } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof productUpdateSchema> }, ctx: PluginContext) => {
+				const { id, ...updates } = routeCtx.input;
 				const existing = (await ctx.storage.products!.get(id)) as Product | null;
 				if (!existing) throw404("Product not found");
 				if (updates.type === "digital" && updates.downloadUrl) {
@@ -1627,8 +1627,8 @@ export default definePlugin({
 
 		"products/delete": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				await ctx.storage.products!.delete(ctx.input.id);
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.products!.delete(routeCtx.input.id);
 				return { success: true };
 			},
 		},
@@ -1637,13 +1637,13 @@ export default definePlugin({
 
 		"products/import-woo": {
 			input: wooImportSchema,
-			handler: async (ctx: any) => {
+			handler: async (routeCtx: { input: z.infer<typeof wooImportSchema> }, ctx: PluginContext) => {
 				const pro = await isPro(ctx);
 				requirePro(pro, "WooCommerce import");
 
 				const results = { imported: 0, skipped: 0, errors: [] as string[] };
 
-				for (const wooProduct of ctx.input.products) {
+				for (const wooProduct of routeCtx.input.products) {
 					try {
 						const slug = slugify(wooProduct.name);
 						const existing = await ctx.storage.products!.query({ where: { slug }, limit: 1 });
@@ -1686,7 +1686,7 @@ export default definePlugin({
 		// ── Categories ──
 
 		"categories/list": {
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const result = await ctx.storage.categories!.query({ orderBy: { sortOrder: "asc" }, limit: 100 });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Category) })) };
 			},
@@ -1694,17 +1694,17 @@ export default definePlugin({
 
 		"categories/create": {
 			input: categorySchema,
-			handler: async (ctx: any) => {
+			handler: async (routeCtx: { input: z.infer<typeof categorySchema> }, ctx: PluginContext) => {
 				const id = genId();
-				await ctx.storage.categories!.put(id, { ...ctx.input, createdAt: now() });
+				await ctx.storage.categories!.put(id, { ...routeCtx.input, createdAt: now() });
 				return { success: true, id };
 			},
 		},
 
 		"categories/delete": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				await ctx.storage.categories!.delete(ctx.input.id);
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.categories!.delete(routeCtx.input.id);
 				return { success: true };
 			},
 		},
@@ -1713,8 +1713,8 @@ export default definePlugin({
 
 		"orders/list": {
 			input: listSchema,
-			handler: async (ctx: any) => {
-				const { limit, cursor, status } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof listSchema> }, ctx: PluginContext) => {
+				const { limit, cursor, status } = routeCtx.input;
 				const where = status ? { status } : undefined;
 				const result = await ctx.storage.orders!.query({ where, orderBy: { createdAt: "desc" }, limit, cursor });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Order) })), cursor: result.cursor, hasMore: result.hasMore };
@@ -1723,19 +1723,19 @@ export default definePlugin({
 
 		"orders/get": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				const order = (await ctx.storage.orders!.get(ctx.input.id)) as Order | null;
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				const order = (await ctx.storage.orders!.get(routeCtx.input.id)) as Order | null;
 				if (!order) throw404("Order not found");
 
 				// Include timeline
 				const notesResult = await ctx.storage.orderNotes!.query({
-					where: { orderId: ctx.input.id },
+					where: { orderId: routeCtx.input.id },
 					orderBy: { createdAt: "desc" },
 					limit: 50,
 				});
 
 				return {
-					id: ctx.input.id,
+					id: routeCtx.input.id,
 					...order,
 					timeline: notesResult.items.map((n: { id: string; data: unknown }) => ({
 						id: n.id, ...(n.data as OrderNote),
@@ -1746,8 +1746,8 @@ export default definePlugin({
 
 		"orders/update": {
 			input: orderUpdateSchema,
-			handler: async (ctx: any) => {
-				const { id, ...updates } = ctx.input;
+			handler: async (routeCtx: { input: z.infer<typeof orderUpdateSchema> }, ctx: PluginContext) => {
+				const { id, ...updates } = routeCtx.input;
 				const existing = (await ctx.storage.orders!.get(id)) as Order | null;
 				if (!existing) throw404("Order not found");
 
@@ -1766,15 +1766,15 @@ export default definePlugin({
 
 		"orders/refund": {
 			input: z.object({ id: z.string().min(1), reason: z.string().max(500).optional() }),
-			handler: async (ctx: any) => {
-				const order = (await ctx.storage.orders!.get(ctx.input.id)) as Order | null;
+			handler: async (routeCtx: { input: { id: string; reason?: string } }, ctx: PluginContext) => {
+				const order = (await ctx.storage.orders!.get(routeCtx.input.id)) as Order | null;
 				if (!order) throw404("Order not found");
 				if (!order.stripePaymentId) throw400("No payment to refund");
 				if (order.status === "refunded") throw400("Order already refunded");
 
 				// Create Stripe refund
 				const params: Record<string, string> = { payment_intent: order.stripePaymentId };
-				if (ctx.input.reason) params.reason = "requested_by_customer";
+				if (routeCtx.input.reason) params.reason = "requested_by_customer";
 
 				try {
 					await stripeRequest(ctx, "refunds", params);
@@ -1783,9 +1783,9 @@ export default definePlugin({
 				}
 
 				order.status = "refunded";
-				order.notes = (order.notes ? order.notes + "\n" : "") + `Refunded${ctx.input.reason ? ": " + ctx.input.reason : ""}`;
+				order.notes = (order.notes ? order.notes + "\n" : "") + `Refunded${routeCtx.input.reason ? ": " + routeCtx.input.reason : ""}`;
 				order.updatedAt = now();
-				await ctx.storage.orders!.put(ctx.input.id, order);
+				await ctx.storage.orders!.put(routeCtx.input.id, order);
 
 				// Restore inventory and notify waitlist
 				for (const item of order.items) {
@@ -1805,18 +1805,18 @@ export default definePlugin({
 					}
 				}
 
-				await addOrderNote(ctx, ctx.input.id, "system", `Refunded via Stripe${ctx.input.reason ? ": " + ctx.input.reason : ""}`).catch(() => {});
+				await addOrderNote(ctx, routeCtx.input.id, "system", `Refunded via Stripe${routeCtx.input.reason ? ": " + routeCtx.input.reason : ""}`).catch(() => {});
 				return { success: true, message: "Order refunded" };
 			},
 		},
 
 		"orders/notes": {
 			input: z.object({ orderId: z.string().min(1), limit: z.coerce.number().default(50) }),
-			handler: async (ctx: any) => {
+			handler: async (routeCtx: { input: { orderId: string; limit: number } }, ctx: PluginContext) => {
 				const result = await ctx.storage.orderNotes!.query({
-					where: { orderId: ctx.input.orderId },
+					where: { orderId: routeCtx.input.orderId },
 					orderBy: { createdAt: "desc" },
-					limit: ctx.input.limit,
+					limit: routeCtx.input.limit,
 				});
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as OrderNote) })) };
 			},
@@ -1828,18 +1828,18 @@ export default definePlugin({
 				message: z.string().min(1).max(2000),
 				type: z.enum(["admin", "customer_visible"]).default("admin"),
 			}),
-			handler: async (ctx: any) => {
-				const order = (await ctx.storage.orders!.get(ctx.input.orderId)) as Order | null;
+			handler: async (routeCtx: { input: { orderId: string; message: string; type: string } }, ctx: PluginContext) => {
+				const order = (await ctx.storage.orders!.get(routeCtx.input.orderId)) as Order | null;
 				if (!order) throw404("Order not found");
-				await addOrderNote(ctx, ctx.input.orderId, ctx.input.type as OrderNote["type"], ctx.input.message, "admin");
+				await addOrderNote(ctx, routeCtx.input.orderId, routeCtx.input.type as OrderNote["type"], routeCtx.input.message, "admin");
 				return { success: true };
 			},
 		},
 
 		"orders/delete": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				await ctx.storage.orders!.delete(ctx.input.id);
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.orders!.delete(routeCtx.input.id);
 				return { success: true };
 			},
 		},
@@ -1848,8 +1848,8 @@ export default definePlugin({
 
 		"customers/list": {
 			input: listSchema,
-			handler: async (ctx: any) => {
-				const result = await ctx.storage.customers!.query({ orderBy: { createdAt: "desc" }, limit: ctx.input.limit, cursor: ctx.input.cursor });
+			handler: async (routeCtx: { input: z.infer<typeof listSchema> }, ctx: PluginContext) => {
+				const result = await ctx.storage.customers!.query({ orderBy: { createdAt: "desc" }, limit: routeCtx.input.limit, cursor: routeCtx.input.cursor });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Customer) })), cursor: result.cursor, hasMore: result.hasMore };
 			},
 		},
@@ -1858,27 +1858,27 @@ export default definePlugin({
 
 		"discounts/list": {
 			input: listSchema,
-			handler: async (ctx: any) => {
-				const result = await ctx.storage.discounts!.query({ limit: ctx.input.limit, cursor: ctx.input.cursor });
+			handler: async (routeCtx: { input: z.infer<typeof listSchema> }, ctx: PluginContext) => {
+				const result = await ctx.storage.discounts!.query({ limit: routeCtx.input.limit, cursor: routeCtx.input.cursor });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Discount) })), cursor: result.cursor, hasMore: result.hasMore };
 			},
 		},
 
 		"discounts/create": {
 			input: discountCreateSchema,
-			handler: async (ctx: any) => {
-				const existing = await ctx.storage.discounts!.query({ where: { code: ctx.input.code }, limit: 1 });
+			handler: async (routeCtx: { input: z.infer<typeof discountCreateSchema> }, ctx: PluginContext) => {
+				const existing = await ctx.storage.discounts!.query({ where: { code: routeCtx.input.code }, limit: 1 });
 				if (existing.items.length > 0) throw400("This discount code already exists");
 				const id = genId();
-				await ctx.storage.discounts!.put(id, { ...ctx.input, usedCount: 0, status: "active" as const, createdAt: now() });
+				await ctx.storage.discounts!.put(id, { ...routeCtx.input, usedCount: 0, status: "active" as const, createdAt: now() });
 				return { success: true, id };
 			},
 		},
 
 		"discounts/delete": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				await ctx.storage.discounts!.delete(ctx.input.id);
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.discounts!.delete(routeCtx.input.id);
 				return { success: true };
 			},
 		},
@@ -1886,7 +1886,7 @@ export default definePlugin({
 		// ── Shipping Zones ──
 
 		"shipping/list": {
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const result = await ctx.storage.shippingZones!.query({ orderBy: { sortOrder: "asc" }, limit: 50 });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as ShippingZone) })) };
 			},
@@ -1908,17 +1908,17 @@ export default definePlugin({
 				})),
 				sortOrder: z.number().int().default(0),
 			}),
-			handler: async (ctx: any) => {
+			handler: async (routeCtx: { input: any }, ctx: PluginContext) => {
 				const id = genId();
-				await ctx.storage.shippingZones!.put(id, { ...ctx.input, createdAt: now() });
+				await ctx.storage.shippingZones!.put(id, { ...routeCtx.input, createdAt: now() });
 				return { success: true, id };
 			},
 		},
 
 		"shipping/delete": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				await ctx.storage.shippingZones!.delete(ctx.input.id);
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.shippingZones!.delete(routeCtx.input.id);
 				return { success: true };
 			},
 		},
@@ -1933,15 +1933,15 @@ export default definePlugin({
 				productId: z.string().min(1),
 				email: z.string().email(),
 			}),
-			handler: async (ctx: any) => {
-				if (isRateLimited(`restock:${ctx.input.email}`, 5)) throw400("Too many requests");
+			handler: async (routeCtx: { input: { productId: string; email: string } }, ctx: PluginContext) => {
+				if (isRateLimited(`restock:${routeCtx.input.email}`, 5)) throw400("Too many requests");
 
-				const product = (await ctx.storage.products!.get(ctx.input.productId)) as Product | null;
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
 				if (!product) throw404("Product not found");
 
 				// Check if already registered
 				const existing = await ctx.storage.stockNotifications!.query({
-					where: { productId: ctx.input.productId, email: ctx.input.email },
+					where: { productId: routeCtx.input.productId, email: routeCtx.input.email },
 					limit: 1,
 				});
 				if (existing.items.length > 0) {
@@ -1949,9 +1949,9 @@ export default definePlugin({
 				}
 
 				await ctx.storage.stockNotifications!.put(genId(), {
-					productId: ctx.input.productId,
+					productId: routeCtx.input.productId,
 					productName: product.name,
-					email: ctx.input.email,
+					email: routeCtx.input.email,
 					notified: false,
 					createdAt: now(),
 				});
@@ -1965,8 +1965,8 @@ export default definePlugin({
 		"storefront/stock": {
 			public: true,
 			input: z.object({ productId: z.string().min(1) }),
-			handler: async (ctx: any) => {
-				const product = (await ctx.storage.products!.get(ctx.input.productId)) as Product | null;
+			handler: async (routeCtx: { input: { productId: string } }, ctx: PluginContext) => {
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
 				if (!product) throw404("Product not found");
 
 				const stock = getStockStatus(product);
@@ -1990,8 +1990,8 @@ export default definePlugin({
 				sessionId: z.string().min(1),
 				country: z.string().min(2).max(2),
 			}),
-			handler: async (ctx: any) => {
-				const cart = await getCart(ctx, ctx.input.sessionId);
+			handler: async (routeCtx: { input: { sessionId: string; country: string } }, ctx: PluginContext) => {
+				const cart = await getCart(ctx, routeCtx.input.sessionId);
 				if (cart.items.length === 0) return { shipping: 0, methodName: "Free" };
 
 				const hasPhysical = cart.items.some((i) => i.type === "physical");
@@ -2004,7 +2004,7 @@ export default definePlugin({
 					}
 				}
 
-				const result = await calculateShipping(ctx, ctx.input.country, subtotal, totalWeight, hasPhysical, false);
+				const result = await calculateShipping(ctx, routeCtx.input.country, subtotal, totalWeight, hasPhysical, false);
 				const currency = (await ctx.kv.get<string>("settings:currency")) ?? "usd";
 				return { shipping: result.cost, methodName: result.methodName, formatted: formatCents(result.cost, currency) };
 			},
@@ -2013,7 +2013,7 @@ export default definePlugin({
 		// ── Tax Rules ──
 
 		"tax/list": {
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const result = await ctx.storage.taxRules!.query({ limit: 100 });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as TaxRule) })) };
 			},
@@ -2028,17 +2028,17 @@ export default definePlugin({
 				compound: z.boolean().default(false),
 				shipping: z.boolean().default(false),
 			}),
-			handler: async (ctx: any) => {
+			handler: async (routeCtx: { input: any }, ctx: PluginContext) => {
 				const id = genId();
-				await ctx.storage.taxRules!.put(id, { ...ctx.input, createdAt: now() });
+				await ctx.storage.taxRules!.put(id, { ...routeCtx.input, createdAt: now() });
 				return { success: true, id };
 			},
 		},
 
 		"tax/delete": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				await ctx.storage.taxRules!.delete(ctx.input.id);
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.taxRules!.delete(routeCtx.input.id);
 				return { success: true };
 			},
 		},
@@ -2048,11 +2048,11 @@ export default definePlugin({
 		"storefront/reviews": {
 			public: true,
 			input: z.object({ productId: z.string().min(1), limit: z.coerce.number().min(1).max(50).default(20) }),
-			handler: async (ctx: any) => {
+			handler: async (routeCtx: { input: { productId: string; limit: number } }, ctx: PluginContext) => {
 				const result = await ctx.storage.reviews!.query({
-					where: { productId: ctx.input.productId, status: "approved" },
+					where: { productId: routeCtx.input.productId, status: "approved" },
 					orderBy: { createdAt: "desc" },
-					limit: ctx.input.limit,
+					limit: routeCtx.input.limit,
 				});
 				return {
 					items: result.items.map((i: { id: string; data: unknown }) => {
@@ -2073,21 +2073,21 @@ export default definePlugin({
 				title: z.string().min(1).max(200),
 				body: z.string().min(1).max(5000),
 			}),
-			handler: async (ctx: any) => {
-				if (isRateLimited(`review:${ctx.input.customerEmail}`, 3)) throw400("Too many reviews. Try again later.");
+			handler: async (routeCtx: { input: any }, ctx: PluginContext) => {
+				if (isRateLimited(`review:${routeCtx.input.customerEmail}`, 3)) throw400("Too many reviews. Try again later.");
 
 				// Check if they purchased the product
-				const orders = await ctx.storage.orders!.query({ where: { customerEmail: ctx.input.customerEmail }, limit: 100 });
+				const orders = await ctx.storage.orders!.query({ where: { customerEmail: routeCtx.input.customerEmail }, limit: 100 });
 				const verified = orders.items.some((o: { data: unknown }) => {
 					const order = o.data as Order;
-					return order.status !== "pending" && order.items.some((i) => i.productId === ctx.input.productId);
+					return order.status !== "pending" && order.items.some((i) => i.productId === routeCtx.input.productId);
 				});
 
-				const product = (await ctx.storage.products!.get(ctx.input.productId)) as Product | null;
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
 
 				const id = genId();
 				await ctx.storage.reviews!.put(id, {
-					...ctx.input,
+					...routeCtx.input,
 					productName: product?.name ?? "Unknown",
 					status: "pending",
 					verified,
@@ -2100,31 +2100,31 @@ export default definePlugin({
 
 		"reviews/list": {
 			input: z.object({ status: z.string().optional(), limit: z.coerce.number().min(1).max(100).default(50) }),
-			handler: async (ctx: any) => {
-				const where = ctx.input.status ? { status: ctx.input.status } : undefined;
-				const result = await ctx.storage.reviews!.query({ where, orderBy: { createdAt: "desc" }, limit: ctx.input.limit });
+			handler: async (routeCtx: { input: { status?: string; limit: number } }, ctx: PluginContext) => {
+				const where = routeCtx.input.status ? { status: routeCtx.input.status } : undefined;
+				const result = await ctx.storage.reviews!.query({ where, orderBy: { createdAt: "desc" }, limit: routeCtx.input.limit });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as Review) })) };
 			},
 		},
 
 		"reviews/approve": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				const review = (await ctx.storage.reviews!.get(ctx.input.id)) as Review | null;
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				const review = (await ctx.storage.reviews!.get(routeCtx.input.id)) as Review | null;
 				if (!review) throw404("Review not found");
 				review.status = "approved";
-				await ctx.storage.reviews!.put(ctx.input.id, review);
+				await ctx.storage.reviews!.put(routeCtx.input.id, review);
 				return { success: true };
 			},
 		},
 
 		"reviews/reject": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				const review = (await ctx.storage.reviews!.get(ctx.input.id)) as Review | null;
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				const review = (await ctx.storage.reviews!.get(routeCtx.input.id)) as Review | null;
 				if (!review) throw404("Review not found");
 				review.status = "rejected";
-				await ctx.storage.reviews!.put(ctx.input.id, review);
+				await ctx.storage.reviews!.put(routeCtx.input.id, review);
 				return { success: true };
 			},
 		},
@@ -2132,7 +2132,7 @@ export default definePlugin({
 		// ── Analytics (Pro) ──
 
 		"analytics/summary": {
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const pro = await isPro(ctx);
 				requirePro(pro, "Analytics dashboard");
 
@@ -2192,7 +2192,7 @@ export default definePlugin({
 		// ── Stats ──
 
 		stats: {
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const [totalOrders, paidOrders, processingOrders, activeProducts, totalCustomers] = await Promise.all([
 					ctx.storage.orders!.count(),
 					ctx.storage.orders!.count({ status: "paid" }),
@@ -2220,7 +2220,7 @@ export default definePlugin({
 		// ── Settings ──
 
 		"settings/get": {
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const [currency, taxRate, flatShipping, freeShippingThreshold, orderNotificationEmail, siteUrl, storeName, stripeKey, stripeWebhookSecret, stripeAccount, licenseKey] = await Promise.all([
 					ctx.kv.get<string>("settings:currency"),
 					ctx.kv.get<number>("settings:taxRate"),
@@ -2265,8 +2265,8 @@ export default definePlugin({
 				stripeWebhookSecret: z.string().optional(),
 				licenseKey: z.string().optional(),
 			}),
-			handler: async (ctx: any) => {
-				const values = ctx.input;
+			handler: async (routeCtx: { input: Record<string, unknown> }, ctx: PluginContext) => {
+				const values = routeCtx.input;
 				const stringFields = ["storeName", "siteUrl", "currency", "orderNotificationEmail"];
 				const secretFields = ["licenseKey", "stripeSecretKey", "stripeWebhookSecret"];
 				const numberFields = ["taxRate", "flatShipping", "freeShippingThreshold"];
@@ -2289,19 +2289,19 @@ export default definePlugin({
 
 		"licenses/list": {
 			input: listSchema,
-			handler: async (ctx: any) => {
-				const result = await ctx.storage.licenses!.query({ orderBy: { createdAt: "desc" }, limit: ctx.input.limit, cursor: ctx.input.cursor });
+			handler: async (routeCtx: { input: z.infer<typeof listSchema> }, ctx: PluginContext) => {
+				const result = await ctx.storage.licenses!.query({ orderBy: { createdAt: "desc" }, limit: routeCtx.input.limit, cursor: routeCtx.input.cursor });
 				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as License) })), cursor: result.cursor, hasMore: result.hasMore };
 			},
 		},
 
 		"licenses/revoke": {
 			input: idSchema,
-			handler: async (ctx: any) => {
-				const license = (await ctx.storage.licenses!.get(ctx.input.id)) as License | null;
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				const license = (await ctx.storage.licenses!.get(routeCtx.input.id)) as License | null;
 				if (!license) throw404("License not found");
 				license.status = "revoked";
-				await ctx.storage.licenses!.put(ctx.input.id, license);
+				await ctx.storage.licenses!.put(routeCtx.input.id, license);
 				return { success: true };
 			},
 		},
@@ -2309,7 +2309,7 @@ export default definePlugin({
 		// ── Orders Clear All ──
 
 		"orders/clear": {
-			handler: async (ctx: any) => {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
 				const result = await ctx.storage.orders!.query({ limit: 1000 });
 				for (const item of result.items) {
 					await ctx.storage.orders!.delete(item.id);
@@ -2323,8 +2323,8 @@ export default definePlugin({
 		"storefront/verify-license": {
 			public: true,
 			input: z.object({ key: z.string().min(1) }),
-			handler: async (ctx: any) => {
-				const result = await ctx.storage.licenses!.query({ where: { key: ctx.input.key }, limit: 1 });
+			handler: async (routeCtx: { input: { key: string } }, ctx: PluginContext) => {
+				const result = await ctx.storage.licenses!.query({ where: { key: routeCtx.input.key }, limit: 1 });
 				if (result.items.length === 0) return { valid: false, error: "Invalid license key" };
 
 				const license = result.items[0]!.data as License;
@@ -2344,18 +2344,18 @@ export default definePlugin({
 		"storefront/related": {
 			public: true,
 			input: z.object({ productId: z.string().min(1), limit: z.coerce.number().min(1).max(10).default(4) }),
-			handler: async (ctx: any) => {
-				const product = (await ctx.storage.products!.get(ctx.input.productId)) as Product | null;
+			handler: async (routeCtx: { input: { productId: string; limit: number } }, ctx: PluginContext) => {
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
 				if (!product) return { items: [] };
 
 				// Get products in same category, excluding current
 				const where: Record<string, unknown> = { status: "active" };
 				if (product.categoryId) where.categoryId = product.categoryId;
 
-				const result = await ctx.storage.products!.query({ where, orderBy: { createdAt: "desc" }, limit: ctx.input.limit + 1 });
+				const result = await ctx.storage.products!.query({ where, orderBy: { createdAt: "desc" }, limit: routeCtx.input.limit + 1 });
 				const related = result.items
-					.filter((i: { id: string }) => i.id !== ctx.input.productId)
-					.slice(0, ctx.input.limit)
+					.filter((i: { id: string }) => i.id !== routeCtx.input.productId)
+					.slice(0, routeCtx.input.limit)
 					.map((i: { id: string; data: unknown }) => {
 						const p = i.data as Product;
 						return { id: i.id, name: p.name, slug: p.slug, price: p.price, compareAtPrice: p.compareAtPrice, images: p.images, type: p.type };
@@ -2370,11 +2370,11 @@ export default definePlugin({
 		"storefront/orders": {
 			public: true,
 			input: z.object({ email: z.string().email(), limit: z.coerce.number().min(1).max(50).default(20) }),
-			handler: async (ctx: any) => {
+			handler: async (routeCtx: { input: { email: string; limit: number } }, ctx: PluginContext) => {
 				const result = await ctx.storage.orders!.query({
-					where: { customerEmail: ctx.input.email },
+					where: { customerEmail: routeCtx.input.email },
 					orderBy: { createdAt: "desc" },
-					limit: ctx.input.limit,
+					limit: routeCtx.input.limit,
 				});
 
 				return {
@@ -2396,8 +2396,8 @@ export default definePlugin({
 		// ══════════════════════════════════════════
 
 		"connect/callback": {
-			handler: async (ctx: any) => {
-				const input = ctx.input as { stripeAccountId?: string; token?: string };
+			handler: async (routeCtx: { input: unknown }, ctx: PluginContext) => {
+				const input = routeCtx.input as { stripeAccountId?: string; token?: string };
 				if (!input.stripeAccountId || !input.token) throw400("Missing connection data");
 
 				// Verify token with platform
@@ -2422,8 +2422,8 @@ export default definePlugin({
 		// ══════════════════════════════════════════
 
 		admin: {
-			handler: async (ctx: any) => {
-				const interaction = ctx.input as {
+			handler: async (routeCtx: { input: unknown }, ctx: PluginContext) => {
+				const interaction = routeCtx.input as {
 					type: string;
 					page?: string;
 					action_id?: string;
