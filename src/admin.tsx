@@ -677,8 +677,8 @@ function ProductEditor({
 	const [price, setPrice] = React.useState(product ? String(product.price / 100) : "");
 	const [compareAtPrice, setCompareAtPrice] = React.useState(product?.compareAtPrice ? String(product.compareAtPrice / 100) : "");
 	const [sku, setSku] = React.useState(product?.sku ?? "");
-	const [status, setStatus] = React.useState(product?.status ?? "draft");
-	const [type, setType] = React.useState(product?.type ?? "physical");
+	const [status, setStatus] = React.useState(product?.status ?? "active");
+	const [type, setType] = React.useState(product?.type ?? "digital");
 	const [categoryId, setCategoryId] = React.useState(product?.categoryId ?? "");
 	const [imageUrl, setImageUrl] = React.useState(product?.images[0] ?? "");
 	const [inventory, setInventory] = React.useState(product ? String(product.inventory === -1 ? "" : product.inventory) : "");
