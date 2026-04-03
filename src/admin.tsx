@@ -1060,8 +1060,197 @@ function ProductEditor({
 // Orders Page
 // =============================================================================
 
+function OrderDetailView({ orderId, onBack }: { orderId: string; onBack: () => void }) {
+	const [order, setOrder] = React.useState<any>(null);
+	const [loading, setLoading] = React.useState(true);
+
+	React.useEffect(() => {
+		apiFetch("orders/get", { id: orderId })
+			.then((res) => res.ok ? parseApiResponse<any>(res) : null)
+			.then((data) => setOrder(data))
+			.catch(() => {})
+			.finally(() => setLoading(false));
+	}, [orderId]);
+
+	if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 64 }}><Loader /></div>;
+	if (!order) return <ErrorBanner message="Order not found" />;
+
+	return (
+		<div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+			<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+				<Button variant="ghost" onClick={onBack}><ArrowLeft style={{ width: 16, height: 16, marginRight: 4 }} /> Back</Button>
+				<h2 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>Order #{order.orderNumber}</h2>
+				<Badge variant={getOrderStatusVariant(order.status)}>{order.status}</Badge>
+			</div>
+
+			<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+				<Card title="Customer">
+					<div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+						<div><strong>{order.customerName}</strong></div>
+						<div style={{ fontSize: 13, opacity: 0.7 }}>{order.customerEmail}</div>
+					</div>
+				</Card>
+				<Card title="Shipping Address">
+					<div style={{ fontSize: 13, lineHeight: 1.6 }}>
+						{order.shippingAddress?.name}<br />
+						{order.shippingAddress?.line1}<br />
+						{order.shippingAddress?.line2 && <>{order.shippingAddress.line2}<br /></>}
+						{order.shippingAddress?.city}, {order.shippingAddress?.state} {order.shippingAddress?.postalCode}<br />
+						{order.shippingAddress?.country}
+					</div>
+				</Card>
+			</div>
+
+			<Card title="Items">
+				<table style={tableStyles.table}>
+					<thead>
+						<tr>
+							<th style={tableStyles.th}>Product</th>
+							<th style={tableStyles.th}>SKU</th>
+							<th style={tableStyles.th}>Price</th>
+							<th style={tableStyles.th}>Qty</th>
+							<th style={{ ...tableStyles.th, textAlign: "right" }}>Total</th>
+						</tr>
+					</thead>
+					<tbody>
+						{order.items.map((item: any, i: number) => (
+							<tr key={i}>
+								<td style={{ ...tableStyles.td, fontWeight: 500 }}>{item.name}</td>
+								<td style={{ ...tableStyles.td, fontSize: 12, opacity: 0.6 }}>{item.sku || "—"}</td>
+								<td style={tableStyles.td}>{formatCurrency(item.price, order.currency)}</td>
+								<td style={tableStyles.td}>{item.quantity}</td>
+								<td style={tableStyles.tdRight}>{formatCurrency(item.price * item.quantity, order.currency)}</td>
+							</tr>
+						))}
+					</tbody>
+				</table>
+				<div style={{ borderTop: "1px solid var(--color-border-default, #e5e7eb)", paddingTop: 12, marginTop: 12 }}>
+					<div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+						<span>Subtotal</span><span>{formatCurrency(order.subtotal, order.currency)}</span>
+					</div>
+					{order.discount > 0 && (
+						<div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "green" }}>
+							<span>Discount{order.discountCode ? ` (${order.discountCode})` : ""}</span><span>-{formatCurrency(order.discount, order.currency)}</span>
+						</div>
+					)}
+					{order.shipping > 0 && (
+						<div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+							<span>Shipping</span><span>{formatCurrency(order.shipping, order.currency)}</span>
+						</div>
+					)}
+					{order.tax > 0 && (
+						<div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+							<span>Tax</span><span>{formatCurrency(order.tax, order.currency)}</span>
+						</div>
+					)}
+					<div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 600, marginTop: 8 }}>
+						<span>Total</span><span>{formatCurrency(order.total, order.currency)}</span>
+					</div>
+				</div>
+			</Card>
+
+			{order.trackingNumber && (
+				<Card title="Tracking">
+					<div style={{ fontSize: 13 }}>
+						<strong>Tracking #:</strong> {order.trackingNumber}
+						{order.trackingUrl && <> — <a href={order.trackingUrl} target="_blank" rel="noopener" style={{ color: "var(--color-accent, #2563eb)" }}>Track Package</a></>}
+					</div>
+				</Card>
+			)}
+
+			{order.timeline && order.timeline.length > 0 && (
+				<Card title="Timeline">
+					<div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+						{order.timeline.map((note: any) => (
+							<div key={note.id} style={{ display: "flex", gap: 8, fontSize: 13, paddingBottom: 8, borderBottom: "1px solid var(--color-border-subtle, #f3f4f6)" }}>
+								<span style={{ opacity: 0.5, whiteSpace: "nowrap" }}>{formatDate(note.createdAt)}</span>
+								<span>{note.message}</span>
+								<Badge variant="default">{note.type}</Badge>
+							</div>
+						))}
+					</div>
+				</Card>
+			)}
+
+			{order.notes && (
+				<Card title="Notes">
+					<p style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{order.notes}</p>
+				</Card>
+			)}
+		</div>
+	);
+}
+
+function CustomerDetailView({ customerId, onBack }: { customerId: string; onBack: () => void }) {
+	const [customer, setCustomer] = React.useState<Customer | null>(null);
+	const [orders, setOrders] = React.useState<Order[]>([]);
+	const [loading, setLoading] = React.useState(true);
+
+	React.useEffect(() => {
+		Promise.all([
+			apiFetch("customers/list", { limit: 100 }).then((r) => r.ok ? parseApiResponse<{ items: Customer[] }>(r) : { items: [] }),
+			apiFetch("orders/list", { limit: 100 }).then((r) => r.ok ? parseApiResponse<{ items: Order[] }>(r) : { items: [] }),
+		]).then(([custData, orderData]) => {
+			const cust = custData.items.find((c) => c.id === customerId) ?? null;
+			setCustomer(cust);
+			if (cust) {
+				setOrders(orderData.items.filter((o) => o.customerEmail === cust.email));
+			}
+		}).catch(() => {}).finally(() => setLoading(false));
+	}, [customerId]);
+
+	if (loading) return <div style={{ display: "flex", justifyContent: "center", padding: 64 }}><Loader /></div>;
+	if (!customer) return <ErrorBanner message="Customer not found" />;
+
+	return (
+		<div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+			<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+				<Button variant="ghost" onClick={onBack}><ArrowLeft style={{ width: 16, height: 16, marginRight: 4 }} /> Back</Button>
+				<h2 style={{ fontSize: 20, fontWeight: 600, margin: 0 }}>{customer.name}</h2>
+			</div>
+
+			<div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16 }}>
+				<StatCard label="Email" value={customer.email} />
+				<StatCard label="Orders" value={String(customer.orderCount)} />
+				<StatCard label="Total Spent" value={formatCurrency(customer.totalSpent, "usd")} />
+				<StatCard label="Last Order" value={customer.lastOrderAt ? formatDate(customer.lastOrderAt) : "Never"} />
+			</div>
+
+			<Card title={`Orders (${orders.length})`}>
+				{orders.length === 0 ? (
+					<p style={{ fontSize: 13, opacity: 0.6 }}>No orders found for this customer.</p>
+				) : (
+					<table style={tableStyles.table}>
+						<thead>
+							<tr>
+								<th style={tableStyles.th}>Order</th>
+								<th style={tableStyles.th}>Items</th>
+								<th style={tableStyles.th}>Total</th>
+								<th style={tableStyles.th}>Status</th>
+								<th style={tableStyles.th}>Date</th>
+							</tr>
+						</thead>
+						<tbody>
+							{orders.map((order) => (
+								<tr key={order.id}>
+									<td style={{ ...tableStyles.td, fontWeight: 500 }}>#{order.orderNumber}</td>
+									<td style={tableStyles.td}>{order.items.reduce((s, i) => s + i.quantity, 0)}</td>
+									<td style={tableStyles.td}>{formatCurrency(order.total, order.currency)}</td>
+									<td style={tableStyles.td}><Badge variant={getOrderStatusVariant(order.status)}>{order.status}</Badge></td>
+									<td style={tableStyles.td}>{formatDate(order.createdAt)}</td>
+								</tr>
+							))}
+						</tbody>
+					</table>
+				)}
+			</Card>
+		</div>
+	);
+}
+
 function OrdersPage() {
 	const [orders, setOrders] = React.useState<Order[]>([]);
+	const [selectedOrderId, setSelectedOrderId] = React.useState<string | null>(null);
 	const [loading, setLoading] = React.useState(true);
 	const [error, setError] = React.useState<string | null>(null);
 
@@ -1127,6 +1316,10 @@ function OrdersPage() {
 
 	if (error) return <ErrorBanner message={error} />;
 
+	if (selectedOrderId) {
+		return <OrderDetailView orderId={selectedOrderId} onBack={() => setSelectedOrderId(null)} />;
+	}
+
 	return (
 		<div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 			<PageHeader title="Orders" description={`${orders.length} order${orders.length !== 1 ? "s" : ""}`} />
@@ -1156,7 +1349,11 @@ function OrdersPage() {
 							<tbody>
 								{orders.map((order) => (
 									<tr key={order.id}>
-										<td style={{ ...tableStyles.td, fontWeight: 500 }}>#{order.orderNumber}</td>
+										<td style={{ ...tableStyles.td, fontWeight: 500 }}>
+												<a onClick={() => setSelectedOrderId(order.id)} style={{ cursor: "pointer", color: "var(--color-accent, #2563eb)" }}>
+													#{order.orderNumber}
+												</a>
+											</td>
 										<td style={tableStyles.td}>{order.customerName}</td>
 										<td style={{ ...tableStyles.td, fontSize: 12 }}>{order.customerEmail}</td>
 										<td style={tableStyles.td}>{order.items.reduce((s, i) => s + i.quantity, 0)}</td>
@@ -1215,6 +1412,7 @@ function OrdersPage() {
 
 function CustomersPage() {
 	const [customers, setCustomers] = React.useState<Customer[]>([]);
+	const [selectedCustomerId, setSelectedCustomerId] = React.useState<string | null>(null);
 	const [loading, setLoading] = React.useState(true);
 	const [error, setError] = React.useState<string | null>(null);
 
@@ -1248,6 +1446,10 @@ function CustomersPage() {
 
 	if (error) return <ErrorBanner message={error} />;
 
+	if (selectedCustomerId) {
+		return <CustomerDetailView customerId={selectedCustomerId} onBack={() => setSelectedCustomerId(null)} />;
+	}
+
 	return (
 		<div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 			<PageHeader title="Customers" description={`${customers.length} customer${customers.length !== 1 ? "s" : ""}`} />
@@ -1273,7 +1475,11 @@ function CustomersPage() {
 						<tbody>
 							{customers.map((customer) => (
 								<tr key={customer.id}>
-									<td style={{ ...tableStyles.td, fontWeight: 500 }}>{customer.name}</td>
+									<td style={{ ...tableStyles.td, fontWeight: 500 }}>
+												<a onClick={() => setSelectedCustomerId(customer.id)} style={{ cursor: "pointer", color: "var(--color-accent, #2563eb)" }}>
+													{customer.name}
+												</a>
+											</td>
 									<td style={tableStyles.td}>{customer.email}</td>
 									<td style={tableStyles.td}>{customer.orderCount}</td>
 									<td style={tableStyles.td}>{formatCurrency(customer.totalSpent)}</td>
