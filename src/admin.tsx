@@ -285,7 +285,7 @@ function Card({ title, children, style: cardStyle }: { title?: string; children:
 	);
 }
 
-function StatCard({ label, value, icon: Icon }: { label: string; value: string | number; icon: React.ElementType }) {
+function StatCard({ label, value, icon: Icon }: { label: string; value: string | number; icon?: React.ElementType }) {
 	return (
 		<div style={{ border: "1px solid var(--color-border-default, #e5e7eb)", borderRadius: 8, padding: 16, background: "var(--color-background-default, #fff)", flex: 1, minWidth: 140 }}>
 			<div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
@@ -293,7 +293,7 @@ function StatCard({ label, value, icon: Icon }: { label: string; value: string |
 					<p style={{ fontSize: 12, opacity: 0.6, margin: 0, textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 500 }}>{label}</p>
 					<p style={{ fontSize: 24, fontWeight: 700, margin: "4px 0 0" }}>{value}</p>
 				</div>
-				<Icon style={{ width: 20, height: 20, opacity: 0.3 }} />
+				{Icon && <Icon style={{ width: 20, height: 20, opacity: 0.3 }} />}
 			</div>
 		</div>
 	);
