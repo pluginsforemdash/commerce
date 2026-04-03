@@ -961,6 +961,11 @@ function isRateLimited(key: string, max: number = 10, windowMs: number = 60_000)
 // ══════════════════════════════════════════
 
 export default definePlugin({
+	id: "commerce",
+	version: "0.3.0",
+	capabilities: ["network:fetch", "email:send", "read:users", "read:content"],
+	allowedHosts: ["api.stripe.com", "api.pluginsforemdash.com", "connect.stripe.com"],
+
 	hooks: {
 		"plugin:install": {
 			handler: async (_event: unknown, ctx: PluginContext) => {
