@@ -966,6 +966,23 @@ export default definePlugin({
 	capabilities: ["network:fetch", "email:send", "read:users", "read:content"],
 	allowedHosts: ["api.stripe.com", "api.pluginsforemdash.com", "connect.stripe.com"],
 
+	storage: {
+		products: { indexes: ["slug", "status", "categoryId", "createdAt", "price", "type", ["categoryId", "createdAt"], ["status", "createdAt"]] },
+		categories: { indexes: ["slug", "parentId", "sortOrder"] },
+		orders: { indexes: ["status", "customerEmail", "createdAt", "stripePaymentId", ["status", "createdAt"], ["customerEmail", "createdAt"]] },
+		customers: { indexes: ["email", "createdAt", "totalSpent"], uniqueIndexes: ["email"] },
+		carts: { indexes: ["sessionId", "updatedAt", "customerEmail"] },
+		discounts: { indexes: ["code", "status", "expiresAt"], uniqueIndexes: ["code"] },
+		downloads: { indexes: ["orderId", "productId", "token", "expiresAt"] },
+		licenses: { indexes: ["orderId", "customerEmail", "productId", "key", "status", "createdAt"], uniqueIndexes: ["key"] },
+		shippingZones: { indexes: ["sortOrder"] },
+		taxRules: { indexes: ["country", "state"] },
+		reviews: { indexes: ["productId", "status", "rating", "createdAt"] },
+		orderNotes: { indexes: ["orderId", "createdAt"] },
+		stockNotifications: { indexes: ["productId", "email", "notified"] },
+		analytics: { indexes: ["date", "type"] },
+	},
+
 	admin: {
 		pages: [
 			{ path: "/", label: "Dashboard", icon: "chart" },
