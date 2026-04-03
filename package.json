@@ -6,7 +6,8 @@
 	"main": "src/index.ts",
 	"exports": {
 		".": "./src/index.ts",
-		"./sandbox": "./src/sandbox-entry.ts"
+		"./sandbox": "./src/sandbox-entry.ts",
+		"./admin": "./src/admin.tsx"
 	},
 	"files": [
 		"src"

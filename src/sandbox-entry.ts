@@ -2181,6 +2181,107 @@ export default definePlugin({
 			},
 		},
 
+		// ── Settings ──
+
+		"settings/get": {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
+				const [currency, taxRate, flatShipping, freeShippingThreshold, orderNotificationEmail, siteUrl, storeName, stripeKey, stripeWebhookSecret, stripeAccount, licenseKey] = await Promise.all([
+					ctx.kv.get<string>("settings:currency"),
+					ctx.kv.get<number>("settings:taxRate"),
+					ctx.kv.get<number>("settings:flatShipping"),
+					ctx.kv.get<number>("settings:freeShippingThreshold"),
+					ctx.kv.get<string>("settings:orderNotificationEmail"),
+					ctx.kv.get<string>("settings:siteUrl"),
+					ctx.kv.get<string>("settings:storeName"),
+					ctx.kv.get<string>("settings:stripeSecretKey"),
+					ctx.kv.get<string>("settings:stripeWebhookSecret"),
+					ctx.kv.get<string>("settings:stripeAccountId"),
+					ctx.kv.get<string>("settings:licenseKey"),
+				]);
+				const tier = await getTier(ctx);
+				return {
+					currency: currency ?? "usd",
+					taxRate: taxRate ?? 0,
+					flatShipping: flatShipping ?? 0,
+					freeShippingThreshold: freeShippingThreshold ?? 0,
+					orderNotificationEmail: orderNotificationEmail ?? "",
+					siteUrl: siteUrl ?? "",
+					storeName: storeName ?? "",
+					hasStripeKey: !!stripeKey,
+					hasStripeWebhookSecret: !!stripeWebhookSecret,
+					hasStripeAccount: !!stripeAccount,
+					hasLicenseKey: !!licenseKey,
+					tier,
+				};
+			},
+		},
+
+		"settings/update": {
+			input: z.object({
+				storeName: z.string().optional(),
+				siteUrl: z.string().optional(),
+				currency: z.string().optional(),
+				taxRate: z.number().min(0).max(100).optional(),
+				flatShipping: z.number().min(0).optional(),
+				freeShippingThreshold: z.number().min(0).optional(),
+				orderNotificationEmail: z.string().optional(),
+				stripeSecretKey: z.string().optional(),
+				stripeWebhookSecret: z.string().optional(),
+				licenseKey: z.string().optional(),
+			}),
+			handler: async (routeCtx: { input: Record<string, unknown> }, ctx: PluginContext) => {
+				const values = routeCtx.input;
+				const stringFields = ["storeName", "siteUrl", "currency", "orderNotificationEmail"];
+				const secretFields = ["licenseKey", "stripeSecretKey", "stripeWebhookSecret"];
+				const numberFields = ["taxRate", "flatShipping", "freeShippingThreshold"];
+
+				for (const key of stringFields) {
+					if (typeof values[key] === "string") await ctx.kv.set(`settings:${key}`, key === "currency" ? (values[key] as string).toLowerCase() : values[key]);
+				}
+				for (const key of secretFields) {
+					if (typeof values[key] === "string" && values[key] !== "") await ctx.kv.set(`settings:${key}`, values[key]);
+				}
+				for (const key of numberFields) {
+					if (typeof values[key] === "number") await ctx.kv.set(`settings:${key}`, values[key]);
+				}
+
+				return { success: true };
+			},
+		},
+
+		// ── Licenses (admin) ──
+
+		"licenses/list": {
+			input: listSchema,
+			handler: async (routeCtx: { input: z.infer<typeof listSchema> }, ctx: PluginContext) => {
+				const result = await ctx.storage.licenses!.query({ orderBy: { createdAt: "desc" }, limit: routeCtx.input.limit, cursor: routeCtx.input.cursor });
+				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as License) })), cursor: result.cursor, hasMore: result.hasMore };
+			},
+		},
+
+		"licenses/revoke": {
+			input: idSchema,
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				const license = (await ctx.storage.licenses!.get(routeCtx.input.id)) as License | null;
+				if (!license) throw404("License not found");
+				license.status = "revoked";
+				await ctx.storage.licenses!.put(routeCtx.input.id, license);
+				return { success: true };
+			},
+		},
+
+		// ── Orders Clear All ──
+
+		"orders/clear": {
+			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
+				const result = await ctx.storage.orders!.query({ limit: 1000 });
+				for (const item of result.items) {
+					await ctx.storage.orders!.delete(item.id);
+				}
+				return { success: true, deleted: result.items.length };
+			},
+		},
+
 		// ── License Verification (public) ──
 
 		"storefront/verify-license": {
