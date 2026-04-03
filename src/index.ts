@@ -42,6 +42,7 @@ export function commercePlugin(
 	return {
 		id: "commerce",
 		version: "0.3.0",
+		entrypoint: "emdash-plugin-commerce",
 		adminEntry: "emdash-plugin-commerce/admin",
 		options,
 		capabilities: ["network:fetch", "email:send", "read:users", "read:content"],
