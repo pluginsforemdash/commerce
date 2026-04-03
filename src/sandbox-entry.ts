@@ -203,6 +203,14 @@ interface TaxRule {
 	createdAt: string;
 }
 
+interface OrderNote {
+	orderId: string;
+	type: "admin" | "system" | "customer_visible";
+	message: string;
+	author?: string; // admin name or "system"
+	createdAt: string;
+}
+
 interface Review {
 	productId: string;
 	productName: string;
@@ -811,7 +819,18 @@ async function calculateTax(
 	return { amount, breakdown: [{ name: "Tax", rate: taxRate, amount }] };
 }
 
-async function resolveDiscount(ctx: PluginContext, code: string, subtotal: number): Promise<{ valid: boolean; amount: number; freeShipping: boolean; error?: string }> {
+async function addOrderNote(ctx: PluginContext, orderId: string, type: OrderNote["type"], message: string, author?: string): Promise<void> {
+	await ctx.storage.orderNotes!.put(genId(), {
+		orderId, type, message, author: author ?? "system", createdAt: now(),
+	});
+}
+
+async function resolveDiscount(
+	ctx: PluginContext,
+	code: string,
+	subtotal: number,
+	cartItems?: CartItem[],
+): Promise<{ valid: boolean; amount: number; freeShipping: boolean; error?: string }> {
 	const result = await ctx.storage.discounts!.query({ where: { code: code.toUpperCase() }, limit: 1 });
 	if (result.items.length === 0) return { valid: false, amount: 0, freeShipping: false, error: "Invalid discount code" };
 
@@ -823,11 +842,25 @@ async function resolveDiscount(ctx: PluginContext, code: string, subtotal: numbe
 		return { valid: false, amount: 0, freeShipping: false, error: `Minimum order of ${formatCents(discount.minOrderAmount, "usd")} required` };
 	}
 
+	// Check product/category restrictions
+	if (cartItems && discount.applicableProducts && discount.applicableProducts.length > 0) {
+		const hasApplicable = cartItems.some((i) => discount.applicableProducts!.includes(i.productId));
+		if (!hasApplicable) return { valid: false, amount: 0, freeShipping: false, error: "This discount doesn't apply to items in your cart" };
+	}
+
 	if (discount.type === "free_shipping") return { valid: true, amount: 0, freeShipping: true };
 
+	// Calculate discount on applicable items only
+	let discountableSubtotal = subtotal;
+	if (cartItems && discount.applicableProducts && discount.applicableProducts.length > 0) {
+		discountableSubtotal = cartItems
+			.filter((i) => discount.applicableProducts!.includes(i.productId))
+			.reduce((s, i) => s + i.price * i.quantity, 0);
+	}
+
 	const amount = discount.type === "percentage"
-		? Math.round(subtotal * (discount.value / 100))
-		: Math.min(discount.value, subtotal);
+		? Math.round(discountableSubtotal * (discount.value / 100))
+		: Math.min(discount.value, discountableSubtotal);
 
 	return { valid: true, amount, freeShipping: false };
 }
@@ -973,6 +1006,14 @@ export default definePlugin({
 
 				let items = result.items.map((i: { id: string; data: unknown }) => {
 					const p = i.data as Product;
+
+					// Calculate price range for variable products
+					const variantPrices = p.variants.filter((v) => v.price !== undefined).map((v) => v.price!);
+					const allPrices = [p.price, ...variantPrices];
+					const minPrice = Math.min(...allPrices);
+					const maxPrice = Math.max(...allPrices);
+					const hasVariablePrice = minPrice !== maxPrice;
+
 					return {
 						id: i.id, name: p.name, slug: p.slug, description: p.description,
 						shortDescription: p.shortDescription, price: p.price,
@@ -980,6 +1021,7 @@ export default definePlugin({
 						variants: p.variants, categoryId: p.categoryId,
 						inventory: p.inventory, type: p.type,
 						seoTitle: p.seoTitle, seoDescription: p.seoDescription,
+						priceRange: hasVariablePrice ? { min: minPrice, max: maxPrice } : null,
 					};
 				});
 
@@ -1114,7 +1156,7 @@ export default definePlugin({
 				const { sessionId, code } = routeCtx.input;
 				const cart = await getCart(ctx, sessionId);
 				const subtotal = cart.items.reduce((sum, i) => sum + i.price * i.quantity, 0);
-				const result = await resolveDiscount(ctx, code, subtotal);
+				const result = await resolveDiscount(ctx, code, subtotal, cart.items);
 				if (!result.valid) return { success: false, error: result.error };
 
 				cart.discountCode = code.toUpperCase();
@@ -1249,6 +1291,7 @@ export default definePlugin({
 				};
 
 				await ctx.storage.orders!.put(orderId, order);
+				await addOrderNote(ctx, orderId, "system", `Order created — redirected to Stripe checkout`).catch(() => {});
 				return { success: true, orderId, orderNumber, checkoutUrl, total, currency };
 			},
 		},
@@ -1283,6 +1326,7 @@ export default definePlugin({
 					if (orderId && order) {
 						order.status = "paid";
 						order.stripePaymentId = paymentIntent;
+						await addOrderNote(ctx, orderId, "system", `Payment confirmed (${paymentIntent})`).catch(() => {});
 						order.updatedAt = now();
 
 						// Decrement inventory
@@ -1593,7 +1637,21 @@ export default definePlugin({
 			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
 				const order = (await ctx.storage.orders!.get(routeCtx.input.id)) as Order | null;
 				if (!order) throw404("Order not found");
-				return { id: routeCtx.input.id, ...order };
+
+				// Include timeline
+				const notesResult = await ctx.storage.orderNotes!.query({
+					where: { orderId: routeCtx.input.id },
+					orderBy: { createdAt: "desc" },
+					limit: 50,
+				});
+
+				return {
+					id: routeCtx.input.id,
+					...order,
+					timeline: notesResult.items.map((n: { id: string; data: unknown }) => ({
+						id: n.id, ...(n.data as OrderNote),
+					})),
+				};
 			},
 		},
 
@@ -1654,7 +1712,34 @@ export default definePlugin({
 					await ctx.storage.products!.put(item.productId, product);
 				}
 
+				await addOrderNote(ctx, routeCtx.input.id, "system", `Refunded via Stripe${routeCtx.input.reason ? ": " + routeCtx.input.reason : ""}`).catch(() => {});
 				return { success: true, message: "Order refunded" };
+			},
+		},
+
+		"orders/notes": {
+			input: z.object({ orderId: z.string().min(1), limit: z.coerce.number().default(50) }),
+			handler: async (routeCtx: { input: { orderId: string; limit: number } }, ctx: PluginContext) => {
+				const result = await ctx.storage.orderNotes!.query({
+					where: { orderId: routeCtx.input.orderId },
+					orderBy: { createdAt: "desc" },
+					limit: routeCtx.input.limit,
+				});
+				return { items: result.items.map((i: { id: string; data: unknown }) => ({ id: i.id, ...(i.data as OrderNote) })) };
+			},
+		},
+
+		"orders/notes/add": {
+			input: z.object({
+				orderId: z.string().min(1),
+				message: z.string().min(1).max(2000),
+				type: z.enum(["admin", "customer_visible"]).default("admin"),
+			}),
+			handler: async (routeCtx: { input: { orderId: string; message: string; type: string } }, ctx: PluginContext) => {
+				const order = (await ctx.storage.orders!.get(routeCtx.input.orderId)) as Order | null;
+				if (!order) throw404("Order not found");
+				await addOrderNote(ctx, routeCtx.input.orderId, routeCtx.input.type as OrderNote["type"], routeCtx.input.message, "admin");
+				return { success: true };
 			},
 		},
 
@@ -2289,6 +2374,7 @@ export default definePlugin({
 								sendShippingConfirmation(ctx, order).catch(() => {});
 							}
 							await ctx.storage.orders!.put(id, order);
+							await addOrderNote(ctx, id, "admin", `Status changed: ${oldStatus} → ${status}`).catch(() => {});
 						}
 					}
 					return buildOrdersPage(ctx);

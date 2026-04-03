@@ -97,6 +97,9 @@ export function commercePlugin(
 			reviews: {
 				indexes: ["productId", "status", "rating", "createdAt"],
 			},
+			orderNotes: {
+				indexes: ["orderId", "createdAt"],
+			},
 			analytics: {
 				indexes: ["date", "type"],
 			},
