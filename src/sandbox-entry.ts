@@ -834,25 +834,38 @@ export default definePlugin({
 				cursor: z.string().optional(),
 			}),
 			handler: async (routeCtx: { input: { category?: string; search?: string; limit: number; cursor?: string } }, ctx: PluginContext) => {
-				const { category, limit, cursor } = routeCtx.input;
+				const { category, search, limit, cursor } = routeCtx.input;
 				const where: Record<string, unknown> = { status: "active" };
 				if (category) where.categoryId = category;
 
-				const result = await ctx.storage.products!.query({ where, orderBy: { createdAt: "desc" }, limit, cursor });
+				const result = await ctx.storage.products!.query({ where, orderBy: { createdAt: "desc" }, limit: search ? 100 : limit, cursor: search ? undefined : cursor });
+
+				let items = result.items.map((i: { id: string; data: unknown }) => {
+					const p = i.data as Product;
+					return {
+						id: i.id, name: p.name, slug: p.slug, description: p.description,
+						shortDescription: p.shortDescription, price: p.price,
+						compareAtPrice: p.compareAtPrice, images: p.images,
+						variants: p.variants, categoryId: p.categoryId,
+						inventory: p.inventory, type: p.type,
+						seoTitle: p.seoTitle, seoDescription: p.seoDescription,
+					};
+				});
+
+				// Client-side search filter (storage doesn't support full-text search)
+				if (search) {
+					const q = search.toLowerCase();
+					items = items.filter((p: { name: string; description: string; shortDescription?: string }) =>
+						p.name.toLowerCase().includes(q) ||
+						p.description.toLowerCase().includes(q) ||
+						(p.shortDescription?.toLowerCase().includes(q) ?? false)
+					).slice(0, limit);
+				}
 
 				return {
-					items: result.items.map((i: { id: string; data: unknown }) => {
-						const p = i.data as Product;
-						return {
-							id: i.id, name: p.name, slug: p.slug, description: p.description,
-							shortDescription: p.shortDescription, price: p.price,
-							compareAtPrice: p.compareAtPrice, images: p.images,
-							variants: p.variants, categoryId: p.categoryId,
-							inventory: p.inventory, type: p.type,
-							seoTitle: p.seoTitle, seoDescription: p.seoDescription,
-						};
-					}),
-					cursor: result.cursor, hasMore: result.hasMore,
+					items,
+					cursor: search ? undefined : result.cursor,
+					hasMore: search ? false : result.hasMore,
 				};
 			},
 		},
@@ -1462,6 +1475,55 @@ export default definePlugin({
 			},
 		},
 
+		"orders/refund": {
+			input: z.object({ id: z.string().min(1), reason: z.string().max(500).optional() }),
+			handler: async (routeCtx: { input: { id: string; reason?: string } }, ctx: PluginContext) => {
+				const order = (await ctx.storage.orders!.get(routeCtx.input.id)) as Order | null;
+				if (!order) throw404("Order not found");
+				if (!order.stripePaymentId) throw400("No payment to refund");
+				if (order.status === "refunded") throw400("Order already refunded");
+
+				// Create Stripe refund
+				const params: Record<string, string> = { payment_intent: order.stripePaymentId };
+				if (routeCtx.input.reason) params.reason = "requested_by_customer";
+
+				try {
+					await stripeRequest(ctx, "refunds", params);
+				} catch (e) {
+					throw400(`Stripe refund failed: ${e instanceof Error ? e.message : "Unknown error"}`);
+				}
+
+				order.status = "refunded";
+				order.notes = (order.notes ? order.notes + "\n" : "") + `Refunded${routeCtx.input.reason ? ": " + routeCtx.input.reason : ""}`;
+				order.updatedAt = now();
+				await ctx.storage.orders!.put(routeCtx.input.id, order);
+
+				// Restore inventory
+				for (const item of order.items) {
+					const product = (await ctx.storage.products!.get(item.productId)) as Product | null;
+					if (!product) continue;
+					if (item.variantId) {
+						const variant = product.variants.find((v) => v.id === item.variantId);
+						if (variant && variant.inventory !== -1) variant.inventory += item.quantity;
+					} else if (product.inventory !== -1) {
+						product.inventory += item.quantity;
+					}
+					product.updatedAt = now();
+					await ctx.storage.products!.put(item.productId, product);
+				}
+
+				return { success: true, message: "Order refunded" };
+			},
+		},
+
+		"orders/delete": {
+			input: idSchema,
+			handler: async (routeCtx: { input: { id: string } }, ctx: PluginContext) => {
+				await ctx.storage.orders!.delete(routeCtx.input.id);
+				return { success: true };
+			},
+		},
+
 		// ── Customers ──
 
 		"customers/list": {
@@ -1610,20 +1672,54 @@ export default definePlugin({
 			},
 		},
 
-		// Debug: check if settings are saved (remove after testing)
-		debug: {
+		// ── Related Products ──
+
+		"storefront/related": {
 			public: true,
-			handler: async (_routeCtx: unknown, ctx: PluginContext) => {
-				const stripeKey = await ctx.kv.get<string>("settings:stripeSecretKey");
-				const siteUrl = await ctx.kv.get<string>("settings:siteUrl");
-				const currency = await ctx.kv.get<string>("settings:currency");
-				const storeName = await ctx.kv.get<string>("settings:storeName");
+			input: z.object({ productId: z.string().min(1), limit: z.coerce.number().min(1).max(10).default(4) }),
+			handler: async (routeCtx: { input: { productId: string; limit: number } }, ctx: PluginContext) => {
+				const product = (await ctx.storage.products!.get(routeCtx.input.productId)) as Product | null;
+				if (!product) return { items: [] };
+
+				// Get products in same category, excluding current
+				const where: Record<string, unknown> = { status: "active" };
+				if (product.categoryId) where.categoryId = product.categoryId;
+
+				const result = await ctx.storage.products!.query({ where, orderBy: { createdAt: "desc" }, limit: routeCtx.input.limit + 1 });
+				const related = result.items
+					.filter((i: { id: string }) => i.id !== routeCtx.input.productId)
+					.slice(0, routeCtx.input.limit)
+					.map((i: { id: string; data: unknown }) => {
+						const p = i.data as Product;
+						return { id: i.id, name: p.name, slug: p.slug, price: p.price, compareAtPrice: p.compareAtPrice, images: p.images, type: p.type };
+					});
+
+				return { items: related };
+			},
+		},
+
+		// ── Customer Order History ──
+
+		"storefront/orders": {
+			public: true,
+			input: z.object({ email: z.string().email(), limit: z.coerce.number().min(1).max(50).default(20) }),
+			handler: async (routeCtx: { input: { email: string; limit: number } }, ctx: PluginContext) => {
+				const result = await ctx.storage.orders!.query({
+					where: { customerEmail: routeCtx.input.email },
+					orderBy: { createdAt: "desc" },
+					limit: routeCtx.input.limit,
+				});
+
 				return {
-					hasStripeKey: !!stripeKey,
-					stripeKeyPrefix: stripeKey ? stripeKey.slice(0, 8) + "..." : null,
-					siteUrl,
-					currency,
-					storeName,
+					items: result.items.map((i: { data: unknown }) => {
+						const o = i.data as Order;
+						return {
+							orderNumber: o.orderNumber, status: o.status,
+							total: o.total, currency: o.currency,
+							itemCount: o.items.reduce((s, item) => s + item.quantity, 0),
+							createdAt: o.createdAt,
+						};
+					}),
 				};
 			},
 		},
@@ -1725,6 +1821,58 @@ export default definePlugin({
 						await ctx.storage.orders!.deleteMany(all.items.map((i: { id: string }) => i.id));
 					}
 					return { ...(await buildOrdersPage(ctx)), toast: { message: `Deleted ${all.items.length} orders`, type: "success" } };
+				}
+
+				// Order refund
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("order_refund:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) {
+						const order = (await ctx.storage.orders!.get(id)) as Order | null;
+						if (order && order.stripePaymentId && order.status !== "refunded") {
+							try {
+								await stripeRequest(ctx, "refunds", { payment_intent: order.stripePaymentId });
+								order.status = "refunded";
+								order.updatedAt = now();
+								await ctx.storage.orders!.put(id, order);
+
+								// Restore inventory
+								for (const item of order.items) {
+									const product = (await ctx.storage.products!.get(item.productId)) as Product | null;
+									if (!product) continue;
+									if (item.variantId) {
+										const variant = product.variants.find((v) => v.id === item.variantId);
+										if (variant && variant.inventory !== -1) variant.inventory += item.quantity;
+									} else if (product.inventory !== -1) {
+										product.inventory += item.quantity;
+									}
+									product.updatedAt = now();
+									await ctx.storage.products!.put(item.productId, product);
+								}
+
+								// Revoke any licenses
+								if (ctx.storage.licenses) {
+									const lics = await ctx.storage.licenses.query({ where: { orderId: id }, limit: 100 });
+									for (const l of lics.items) {
+										const lic = l.data as License;
+										lic.status = "revoked";
+										await ctx.storage.licenses.put(l.id, lic);
+									}
+								}
+
+								return { ...(await buildOrdersPage(ctx)), toast: { message: `Order ${order.orderNumber} refunded`, type: "success" } };
+							} catch (e) {
+								return { ...(await buildOrdersPage(ctx)), toast: { message: `Refund failed: ${e instanceof Error ? e.message : "Unknown error"}`, type: "error" } };
+							}
+						}
+					}
+					return buildOrdersPage(ctx);
+				}
+
+				// Order delete
+				if (interaction.type === "block_action" && interaction.action_id?.startsWith("order_delete:")) {
+					const id = interaction.action_id.split(":")[1];
+					if (id) await ctx.storage.orders!.delete(id);
+					return { ...(await buildOrdersPage(ctx)), toast: { message: "Order deleted", type: "success" } };
 				}
 
 				// Product delete
@@ -1855,6 +2003,32 @@ async function buildDashboard(ctx: PluginContext) {
 
 		if (processingCount > 0) {
 			blocks.push({ type: "banner", variant: "default", title: `${processingCount} order${processingCount > 1 ? "s" : ""} need processing`, description: "Go to Orders to fulfill them." });
+		}
+
+		// Low stock alerts
+		const allProducts = await ctx.storage.products.query({ where: { status: "active" }, limit: 100 });
+		const lowStock = (allProducts?.items ?? []).filter((i: { data: unknown }) => {
+			const p = i.data as Product;
+			return p.inventory !== -1 && p.inventory > 0 && p.inventory <= 5;
+		});
+		const outOfStock = (allProducts?.items ?? []).filter((i: { data: unknown }) => {
+			const p = i.data as Product;
+			return p.inventory === 0;
+		});
+
+		if (outOfStock.length > 0) {
+			blocks.push({
+				type: "banner", variant: "error",
+				title: `${outOfStock.length} product${outOfStock.length > 1 ? "s" : ""} out of stock`,
+				description: outOfStock.map((i: { data: unknown }) => (i.data as Product).name).join(", "),
+			});
+		}
+		if (lowStock.length > 0) {
+			blocks.push({
+				type: "banner", variant: "alert",
+				title: `${lowStock.length} product${lowStock.length > 1 ? "s" : ""} running low`,
+				description: lowStock.map((i: { data: unknown }) => `${(i.data as Product).name} (${(i.data as Product).inventory} left)`).join(", "),
+			});
 		}
 
 		const recent = await ctx.storage.orders.query({ orderBy: { createdAt: "desc" }, limit: 10 });
@@ -2040,12 +2214,35 @@ async function buildOrdersPage(ctx: PluginContext) {
 				})),
 			});
 
-			for (const o of orders.slice(0, 10)) {
+			// Per-order actions based on status
+			for (const o of orders) {
+				const elements: unknown[] = [];
+
 				if (o.data.status === "paid") {
-					blocks.push({ type: "actions", elements: [
-						{ type: "button", text: `Ship ${o.data.orderNumber}`, action_id: `order_status:${o.id}:shipped` },
-						{ type: "button", text: "Processing", action_id: `order_status:${o.id}:processing` },
-					]});
+					elements.push({ type: "button", text: `Mark Processing`, action_id: `order_status:${o.id}:processing` });
+					elements.push({ type: "button", text: `Ship`, action_id: `order_status:${o.id}:shipped`, style: "primary" });
+				}
+				if (o.data.status === "processing") {
+					elements.push({ type: "button", text: `Ship ${o.data.orderNumber}`, action_id: `order_status:${o.id}:shipped`, style: "primary" });
+				}
+				if (o.data.status === "shipped") {
+					elements.push({ type: "button", text: `Mark Delivered`, action_id: `order_status:${o.id}:delivered` });
+				}
+				if (["paid", "processing", "shipped"].includes(o.data.status) && o.data.stripePaymentId) {
+					elements.push({
+						type: "button", text: "Refund", action_id: `order_refund:${o.id}`, style: "danger",
+						confirm: { title: `Refund ${o.data.orderNumber}?`, text: `This will refund ${formatCents(o.data.total, currency)} to the customer and revoke any licenses.`, confirm: "Refund", deny: "Cancel" },
+					});
+				}
+				if (["pending", "cancelled", "refunded"].includes(o.data.status)) {
+					elements.push({
+						type: "button", text: "Delete", action_id: `order_delete:${o.id}`, style: "danger",
+						confirm: { title: "Delete Order?", text: `Permanently delete ${o.data.orderNumber}?`, confirm: "Delete", deny: "Cancel" },
+					});
+				}
+
+				if (elements.length > 0) {
+					blocks.push({ type: "actions", elements });
 				}
 			}
 
